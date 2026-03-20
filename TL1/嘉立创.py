@@ -5,6 +5,7 @@ import os, requests, time
 # 变量：jlc_gpt（备注#X-JLC-AccessToken#secretkey）多账号&分割或换行分割
 # 功能：签到＋积分统计＋美化推送
 # 定时：cron 45 5 * * * 每天一次自行修改
+# 注意：连续七天奖励没搞定，本子不会领取需要手动领一下
 # ==========================================
 
 def push_msg(title, content):
