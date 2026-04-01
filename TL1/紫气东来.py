@@ -3,7 +3,7 @@ import requests, os, time, json
 from datetime import datetime
 
 """
-名称：紫气东来签到 V2.1（小程序搜索紫气东来）
+名称：小紫有约签到 V2.1（小程序搜索小紫有约）
 说明：变量值SESSION在sxkyziqidonglai.cn域名下的cookie中
 变量：zqdl_gpt (格式：备注#SESSION) 多账号用 & 分割
 定时：cron 5 6 * * * 每天一次自行修改
@@ -109,7 +109,7 @@ def main():
         time.sleep(1.5)
 
     if summary:
-        send_msg("紫气东来🙋‍♀️签到", "\n\n".join(summary))
+        send_msg("小紫有约🙋‍♀️签到", "\n\n".join(summary))
 
 if __name__ == '__main__':
     main()
