@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-移动云盘自动签到 v5.0.6
+移动云盘自动签到 v5.1.1
 
 包含以下功能:
 1. 每日自动签到 (签到/抽奖/摇一摇/新版云朵领取)
@@ -9,7 +9,54 @@
 3. 云朵中心新版任务自动处理 (上传/分享/AI相机/月任务补传等)
 4. 临时文件智能清理与详细日志推送
 
+==================== 使用说明 ====================
+依赖:
+    pip3 install requests pycryptodome
+    (pycryptodome 用于自动刷新 Authorization；未安装仅跳过刷新，不影响签到)
+
+环境变量:
+    ydyp            【必填】账号，格式 <Authorization>#<手机号>
+                    多账号用 & 连接，例如:
+                    Basic xxxxxx#13800000000&Basic yyyyyy#13900000000
+    各活动开关（不填即用默认值，填 0/false/no/off 关闭）:
+    YDYP_TOKENPK        算力大作战          默认 1
+    YDYP_LIVE_FLOWER    直播间红花          默认 1
+    YDYP_MCLOUD_DAY     云盘日(只读探测)    默认 0
+    其它可选:
+    ydyp_device_id      手动指定 deviceId（一般不用填，自动生成并缓存）
+    ydyp_storage_dir    缓存目录（默认=脚本所在目录）
+
+缓存文件（脚本自动生成，请勿外发）:
+    ydyp_device_ids.json    手机号 -> {deviceId, token, expiresAt}
+    ydyp_token_storage.json 同上的旧版结构
+
+说明: 脚本会在你的云盘里创建临时文件 auto_upload_*.txt / auto_share_*.txt
+      用于完成"上传/分享"任务，跑完会自动清理。
+
 更新说明:
+
+### 20260922
+v5.1.1:
+- 修复算力大作战领取奖励失败的问题：原实现在"登记(click)"之后立即调用
+  receivePrize，服务端一律返回"奖品发放失败"。按云朵中心 H5 的真实状态机
+  改为 WAIT→登记/预约、SUCCESS→领奖，两者分开两次运行完成。
+- 新增阶段奖励自动领取（toplist/progress/autoReceiveLotteryChance），与 H5 行为一致。
+- 领奖失败/成功时输出 prizes[].prizeName 与 errorMsg，便于定位。
+
+### 20260921
+v5.1.0:
+- 剔除已过期活动：五一福利任务组、五一回忆上传(587)、五一出游攻略(588)、假期九宫格(589)。
+- 依据 mCloud 13.2.2 云朵中心 H5 新增活动：算力大作战、直播间红花、云盘日（只读探测）。
+- 新增活动开关，可逐个用环境变量关闭。
+- 修复令牌失效静默跳过的问题：现在会输出具体失败原因并计入失效账号。
+
+### 20260920
+v5.0.7:
+- 修复摇一摇接口失效(404)时反复重试并抛出 'NoneType' object has no attribute 'json' 的问题。
+- 修复 AI 相机任务在缺少 assets/ai_camera_sample.jpg 时直接失败的问题（内置兜底样图）。
+- 修复本地缓存 Token 已过期时仍覆盖环境变量 Authorization 的问题。
+- 任务列表按 id 去重，避免同一任务被重复登记。
+- 领取云朵失败时自动重试，缓解"活动太火爆，锁定失败"。
 
 ### 20260531
 v5.0.6:
@@ -62,7 +109,7 @@ pip3 install requests pycryptodome
 
 Author: YaoHuo8648
 Email: zheyizzf@188.com
-Update: 2026.05.31
+Update: 2026.09.21
 """
 
 import base64
@@ -87,7 +134,24 @@ except ImportError:
     AES = None
     pad = None
 
-SCRIPT_VERSION = '5.0.6'
+SCRIPT_VERSION = '5.1.1'
+
+
+# ==================== 活动开关（依据 mCloud 13.2.2 云朵中心 H5）====================
+def env_flag(name, default):
+    value = (os.environ.get(name) or '').strip().lower()
+    if not value:
+        return default
+    return value in ('1', 'true', 'yes', 'on', 'y')
+
+ENABLE_TOKENPK = env_flag('YDYP_TOKENPK', True)          # 算力大作战 /ycloud/tokenpk/*
+ENABLE_LIVE_FLOWER = env_flag('YDYP_LIVE_FLOWER', True)  # 直播间红花 /ycloud/liveRoomFeedback/*
+ENABLE_MCLOUD_DAY = env_flag('YDYP_MCLOUD_DAY', False)   # 云盘日（默认只读探测）
+TOKENPK_MARKET = 'National_TokenPK'
+MCLOUD_DAY_MARKET = 'mcloudday'
+
+# AI 相机兜底样图（320x240 JPEG）：未上传 assets/ai_camera_sample.jpg 时使用
+AI_CAMERA_SAMPLE_FALLBACK_B64 = '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDABALDA4MChAODQ4SERATGCgaGBYWGDEjJR0oOjM9PDkzODdASFxOQERXRTc4UG1RV19iZ2hnPk1xeXBkeFxlZ2P/2wBDARESEhgVGC8aGi9jQjhCY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2P/wAARCADwAUADASIAAhEBAxEB/8QAGgABAQEBAQEBAAAAAAAAAAAAAAIBBAUDBv/EADUQAAICAAMECQMEAgIDAAAAAAABAhEDBCExQWFxBRITFDJCYpGhIlGBUrHB0RXwI+FTgqL/xAAZAQEAAwEBAAAAAAAAAAAAAAAAAQIDBAX/xAAhEQEAAwACAgMBAQEAAAAAAAAAAQIRA1EEEyExQRIiYf/aAAwDAQACEQMRAD8A2hRVCj1deYmhRVChomhRVChomhRVChomhRVChomhRVChomhRVChomhRVChomhRVChomhRVChomhRVChomhRVChomhRVChomhRVChomhRVChomhRVChomhRVChomhRVChomhRVChomhRVChoqhRVCimrJoUVQoaJoUVQoaJoUVQoaJoUVQoaJoUVQoaJoUVQoaJoUVQoaJoUVQoaJoUVQoaJoUVQoaJoUVQoaJoUVQoaJoUVR6+Q6K8OLmVxWG1+/9GfJzV442y9OObzkPKwsDFx5VhYcpvY6WzmdH+Kzn/h/+o/2fo0lGKjFJJaJLcaefbz77/mHXHi1/ZflMbK42Xf/AC4corZdae58qP2B5me6Kji3iZdKEkvAlSf9GvF5sWnLxjO/jTEbX5eFQotxcW1JNNaNPcZR365U0KKoUNE0KKoUNE0KKoUNF0KKoUZ6lNCiqFDRNCiqFDRNCiqFDRNCiqFDRNCiqFDRNCiqFDRNCiqFDRNCiqFDRNCiqFDRNCiqFDRNCiqFDRNCiqFDR2dFZWGPjSliJOGHWn3e4904+ioKGSi1f1tt/t/B2HkeTeb8k/8AHo8Nf5pAADnbAAA8fpjKwg448El1nUl939zzKP0megsTJ4qd+FvThqfnaPV8Xkm1Mn8ef5FIrbY/U0KKoUdWsE0KKoUNE0KKoUNFUKKoUU1KaFFUKGiaFFUKGiaFFUKGiaFFUKGiaFFUKGiaFFUKGiaFFUKGiaFFUKGiaFFUKGiaFFUKGiaFFUKGiaFFUKGj2ujJJ5KCT1i2n73/ACdZ5PRWMsPElhSdKey3v/39j1jyeev88kvR4bbSAAGLUAAHxzklHKYrk6XVa99D89R63SuMupHBi9buVPYeXR6Xi1/mmz+uHyLbbOk0KKoUdWudNCiqFDRNCiqFDRdCiqFGerJoUVQoaJoUVQoaJoUVQoaJoUVQoaJoUVQVPZTGiaFFUKGiaFFUKGiaFFUKGiaFFUKGiaFFUKGiaFFUKGiaFFUKGiaPVymeWL1cPF0xNl7meZQoz5KRyRkr0vNJ2H6AHi4WaxsKurNtfZ6o+3+Rxv04fs/7OOfGtH06o56/r1DmzWchgXFLrYlbNy5nBiZzHxPP1V9o6HPRpTxvnbKX8j8qyTc5OUtW3bMoqhR2a5U0KKoUNE0KKoUNE0KKoUNFUKLoUU1KKFF0KGiKFF0KGiKFF0KGiKDpJtuktrZmNi4eBDrYkkvst75HkZrNTzMla6sFsjY1MV19s1nnP6MFuK3y2NnPgZieBJOLuO+O5nxAa5GY9zAxoY8OtB7Nqe1H0o8LDxJ4cutCTi+B62UzkMxUX9OJWzc+QZzXH3oUXQoaqihRdChoihRdChoihRdChoihRdChoihRdChoihRdChoihRdChoihRdChoihRdChoihRdChoihRdChoihRdChoqhRVCjPUpoUVQoaJoUVQoaJo5c3nIZdOK+rF3R+3M+Gd6RVPDy712Of9HmNuTbbbb1bZaIWivasXFnjT6+JLrSIALNAAADU2mmnTWxowAenk+kFSw8du9in/Z6VH5o7MnnpZb6JJzw/tvXIiYUmvT2aFDDlHEgpwalF7GiqKaomhRVChomhRVChomhRVEYuJh4MHPFmoR+7Y0bR88bHwsvHrYs1Fbr2v8Hm5rpnbHLR/wDeX8L/AHkeTOcpycpycpPa27ZaIWir0M30tiYjccveHD7vxP8Ao58DP5jAdxm5J6uM9UcwLYvkPfy3SmBjaT/4pep6e53Ufkjpy2ex8tpCdx/TLVETCs16fpKFHFlulcvj6Yj7Kf2k9Pc76K/SmJoUVQojRNCiqFDRNCiqFDRNCiqFDRVCi6FFNSihRdHPm83hZWP1u5tXGC2v+hHynF4uJDCh18SSjH7s8TO5+WZ+iKcMP7Xq+Z8czmcTNTUsRrTYlsR8TWK4tEYAAssAAAAAAAAAAD75XMzy2L1oap+KO5nuZXMwzWF1oaNeKO9H5wrDnLCmpwk4yWxorNdRMa/T0KOTJdI4eY+jErDxNyvSXL+juoyn4+1MRQk1GLlJpJK23uPPzvTGDgNwwEsWdbU/pX53ni5nOY+aleLNtXpFaJfgtFZlMVermumoR+nLR67/AFS0Xtt/Y8fHx8TMYnXxZuUqqz5g1iIhaIwABKQAAAAAOnK5/MZXTDncP0S1X/RzAgfosr0tl8fTEfYz+0np7nfR+OOvJdI42TdRfXw/0Sei5fYpNOlZq/TUKOXKdJ5bNVHrdniPyy38nvO2jOfj7VxFCi6FDUIoUXQoaKoUbOUcOLlOSjFbW3SPD6Q6UeOpYOAnHDunLfJfwitYm30tjqz/AEnHB62Fg/VirRy3R/7PFxMSeLiOeJJylLVtkA6K1iFojAAEpAAAAAAAAAAAAAAGSmo7T5Sm5cEB9JTUeLKx89mcxhqGLiycFpX35/f8nOBgAAkAAAAAAAAAAAAAAAADtyfSmYytR63aYa8sty4PccQImIn7H6jJ9KZbNVHrdniPyy3vg953UfiTuyfSuZytR63aYa8kty4PcZW4+lcfqKFHHk+lctm6j1uzxH5J73we/wDc7qMp2PtGPz2dzWLnJLrtRgnpFfz92cnZcfg+g3lI5LR8QnXz7Lj8DsuPwfQE+2/Zr59lx+B2XH4PoB7b9mvn2XH4HZcfg+gWqHtv2a+fZcfgdlx+D6DYPbfs18+y4/A7Lj8H0A9t+zXz7Lj8DsuPwfTeB7b9mvn2XH4Mlgt7J1+D6ge2/Zrn7r6/gd19fwdAHtv2a5+6+v4HdfX8HZhYGJix62HG1zL7pj/o+UPbftOWcHdfX8Duvr+Dv7pj/o+UTiYGJhR6040rrah7b9mWcXdfX8Duvr+DoG8e2/aNc/dfX8Duvr+DoA9t+zXP3X1/A7r6/g6APbfs1z919fwO6+v4OgLVD237Nc/dfX8Duvr+DoGwe2/Zrn7r6/gd19fwdAHtv2a5+6+v4HdfX8HRvA9t+zXP3X1/A7r6/g6APbfs1z919fwd+TzmZylR7XtMNeSa2Lg937HwBE8lp+zQzzfg0xbXzKIaAAMjv5mmR8K5GgJaRfILRGS2fk0AY93M0x+JcgNAAGeb8GmLa+ZoAyO/maZHwrkBolpF8gKcmorVtpAerlIdTLQWmqvQ+wSSVJUkDR2RGRgfHNw6+XmtLSvU+waTVNWmCY2MeIZ5vwXOLhNxe1OiFtfMzcbQABkd/M0yPhXI0BLSL5BaIyWz8mgDHu5mmPxLkBoAAzzfg0xbXzNAGR38zTI+FcgNEtIvkDJbPyBpkdhrdKwlSSAGS8LNMe5cQNAAGPajTPNyRoAxeJmmLe+IGgBulYGR2GhKkkAMl4WaY9y4mgD7ZSHXzUNLUfqf+86PidnR0LnOeuipfb/dCY+1qRtod4ALusAAHmZ2HVzDelSV6HNHYd/SUfojiaaaP7nClSSKT9uW8ZaQyXhZpj3LiQo0AAY9qNM83JGgDF4maYt74gaAG6VgZHYaEqSQAyXhZpj3LiaAMe1GmebkgEtnPQ0x7lxNAGPavc0zzckBoAAxbX7GmLe+JoAyOznqa3SbCVKgBktnPQ0x7lxA0AAY9q9zTPNyRoA9PIxSyya8zbZ5h7MI9SEY3dJKyateKPnVAAu6AAAfHOQ7TKzSq0r1PKPaklKLi9jVM8aScZOL2p0ytmHLHzrDHtXuaZ5uSKsWgADFtfsaYt74mgDI7OeprdJsJUqAGS2c9DTHuXEDQABj2r3NM83JGgDFtfsaYt74gH4kaZ5nyNAGLazTI7PyBoAl4WBkfCjQAMlsNMe1czQBj8SNM8z5AaAAMW1mmR2fk0D65WPWzEFda37anrHn9HwvFlLT6VR6Berp4o/yAAloAAAeXnIdTMS0pPVHqHF0jDwTS4N/t/JE/TPljauExbWaZHZ+SjmaAJeFgZHwo0ADJbDTHtXM0AY/EjTPM+QGgADFtZpkdn5NAGR8KNl4WAMW/maZHZz1NAPRCOkVyMl4Xx0NAGS3czTHtXuBoAAzzfg0xeJ+xoAxb+ZpkdnPUDQ9EDJeF8dANjpFcgAB6OQjWA5NeJ7eB1EYMOzwYRqmlquJZeHZWMjAAEpAAAPhnIdfLy0trVH3MklKLi9jVMImNjHivRCOkVyGInHrRejWgM3GGS3czTHtXuBoAAzzfg0xeJ+xoAxb+ZpkdnPUDQ9EDJeF8dANjpFcgABkt3M0x7V7mgf/2Q=='
 
 TOKEN_STORAGE_FILENAME = 'ydyp_token_storage.json'
 DEVICE_ID_STORAGE_FILENAME = 'ydyp_device_ids.json'  # 简易 deviceId 存储：手机号 -> deviceId
@@ -412,6 +476,7 @@ class YP:
             self.market_cookies = {}
             self.session = requests.Session()
             self.user_log_lines = []
+            self.auth_fail_reason = ''
 
             self.timestamp = str(int(round(time.time() * 1000)))
             self.cookies = {'sensors_stay_time': self.timestamp}
@@ -462,24 +527,23 @@ class YP:
         return (self.token_storage.get('accounts') or {}).get(self.account, {}) or {}
 
     def load_persisted_authorization(self):
-        """加载已保存的 Authorization，优先从简易存储读取"""
-        # 优先从新版简易存储读取
-        new_storage = get_token_info(self.account)
-        stored_token = normalize_authorization(new_storage.get('token', ''))
-        if stored_token:
-            self.Authorization = stored_token
-            # 同时也写入旧版存储，保持兼容
-            token_storage = load_token_storage()
-            if self.account not in token_storage.get('accounts', {}):
-                token_storage['accounts'][self.account] = {}
-            token_storage['accounts'][self.account]['token'] = stored_token
-            save_token_storage(token_storage)
-            return
-        # 后备：从旧版 token_storage 读取
+        """加载已保存的 Authorization，优先从简易存储读取；
+        缓存 Token 已过期时保留环境变量中的 Authorization，避免新抓的 ck 被旧缓存覆盖"""
         stored = self.get_storage_record()
         stored_token = normalize_authorization(stored.get('token', ''))
-        if stored_token:
-            self.Authorization = stored_token
+        expires_at = int(stored.get('expiresAt') or 0)
+        if stored_token and expires_at and current_millis() >= expires_at:
+            print('本地缓存Token已过期，本次使用环境变量中的 Authorization')
+            return
+        if not stored_token:
+            return
+        self.Authorization = stored_token
+        # 同时也写入旧版存储，保持兼容
+        token_storage = load_token_storage()
+        if self.account not in token_storage.get('accounts', {}):
+            token_storage['accounts'][self.account] = {}
+        token_storage['accounts'][self.account]['token'] = stored_token
+        save_token_storage(token_storage)
 
     def load_or_create_market_device_profile(self):
         """加载 deviceId；未配置环境变量且缓存为空时自动生成并保存"""
@@ -651,6 +715,7 @@ class YP:
             self.signin_status()
             self.click()
             self.get_tasklist(url = 'sign_in_3', app_type = 'cloud_app')
+            self.run_new_activities()
             self.log(f'\n📰 公众号任务')
             self.wxsign()
             self.shake()
@@ -667,7 +732,7 @@ class YP:
         else:
             global err_accounts
             # 失效账号
-            err_accounts += f'{self.encrypt_account}\n'
+            err_accounts += f'{self.encrypt_account}: {self.auth_fail_reason or "Authorization 失效，无法换取 JWT"}\n'
 
     @catch_errors
     def send_request(self, url, headers=None, cookies=None, data=None, params=None, method='GET', debug=None,
@@ -692,6 +757,17 @@ class YP:
                 if debug:
                     print(f'\n【{url}】响应数据:\n{response.text}')
                 return response
+            except requests.HTTPError as e:
+                # 4xx 为客户端错误（活动下线、接口下线等），重试无意义
+                status_code = e.response.status_code if e.response is not None else 0
+                print(f"请求异常: {e}")
+                if 400 <= status_code < 500:
+                    print("客户端错误，停止重试。")
+                    return None
+                if attempt >= retries - 1:
+                    print("达到最大重试次数。")
+                    return None
+                time.sleep(1)
             except (requests.RequestException, ConnectionError, TimeoutError) as e:
                 print(f"请求异常: {e}")
                 if attempt >= retries - 1:
@@ -1077,31 +1153,13 @@ class YP:
         headers['x-DeviceInfo'] = f'||36|{self.client_version}|Apple|iPhone 16 Pro|{device_id.lstrip("B")}|iOS 18.7|||||'
         return headers
 
-    def encrypt_ai_tool_account(self):
-        if AES is None or pad is None:
-            raise ImportError('未安装 pycryptodome，无法加密AI工具账号')
-        cipher = AES.new(AI_TOOL_ACCOUNT_AES_KEY.encode('utf-8'), AES.MODE_CBC, AI_TOOL_ACCOUNT_AES_IV.encode('utf-8'))
-        encrypted = cipher.encrypt(pad(self.account.encode('utf-8'), AES.block_size))
-        raw = AI_TOOL_ACCOUNT_AES_IV + base64.b64encode(encrypted).decode('utf-8')
-        return base64.b64encode(raw.encode('utf-8')).decode('utf-8')
-
-    def build_ai_tool_ad_headers(self):
-        return {
-            'Authorization': self.Authorization,
-            'User-Agent': market_ua,
-            'Accept': 'application/json, text/plain, */*',
-            'Content-Type': 'application/json',
-            'Origin': 'https://yun.139.com',
-            'Referer': 'https://yun.139.com/aiTools/',
-            'x-yun-tid': str(uuid.uuid4()),
-        }
-
     def get_ai_camera_sample_base64(self):
         sample_path = path.join(path.abspath(path.dirname(__file__)), 'assets', 'ai_camera_sample.jpg')
-        if not path.exists(sample_path):
-            return ''
-        with open(sample_path, 'rb') as file:
-            return f"data:image/jpg;base64,{base64.b64encode(file.read()).decode()}"
+        if path.exists(sample_path):
+            with open(sample_path, 'rb') as file:
+                return f"data:image/jpg;base64,{base64.b64encode(file.read()).decode()}"
+        # 未上传 assets/ai_camera_sample.jpg 时使用内置兜底样图，避免任务直接失败
+        return f"data:image/jpg;base64,{AI_CAMERA_SAMPLE_FALLBACK_B64}"
 
     @staticmethod
     def is_ai_chat_success(text):
@@ -1205,57 +1263,6 @@ class YP:
         self.log('AI相机对话失败: 响应解析失败')
         return False
 
-    def complete_travel_guide_ai_task(self):
-        if not self.user_domain_id:
-            self.log('出行攻略问AI失败: 缺少用户信息')
-            return False
-        input_time = datetime.now(timezone(timedelta(hours = 8))).isoformat(timespec = 'milliseconds')
-        chat_payload = json.dumps({
-            'userId': self.user_domain_id,
-            'sessionId': '',
-            'applicationType': 'chat',
-            'applicationId': '',
-            'sourceChannel': '101',
-            'dialogueInput': {
-                'dialogue': '给我一份五一出行攻略',
-                'prompt': '',
-                'inputTime': input_time,
-                'enableForceLlm': False,
-                'enableForceNetworkSearch': True,
-                'enableModelThinking': False,
-                'enableAllNetworkSearch': False,
-                'enableKnowledgeAndNetworkSearch': False,
-                'enableRegenerate': False,
-                'versionInfo': {'h5Version': '2.7.6'},
-                'extInfo': '{}',
-                'sortInfo': {},
-                'toolSetting': {'imageToolSetting': {'enableLlmDescribe': True}},
-                'attachment': {},
-            },
-        }, ensure_ascii = False, separators = (',', ':'))
-        chat_response = self.send_request('https://ai.yun.139.com/api/outer/assistant/chat/v2/add',
-                                          headers = self.build_ai_headers(use_client_info = True),
-                                          data = chat_payload,
-                                          method = 'POST')
-        if not chat_response:
-            self.log('出行攻略问AI失败: 接口无响应')
-            return False
-        response_text = chat_response.text or ''
-        if chat_response.status_code == 200 and not response_text.strip():
-            return True
-        if self.is_ai_chat_success(response_text):
-            return True
-        try:
-            chat_data = chat_response.json()
-        except ValueError:
-            chat_data = None
-        if chat_data and (chat_data.get('success') or chat_data.get('code') == '0000'):
-            return True
-        if chat_data:
-            self.log(f"出行攻略问AI失败: {chat_data.get('message') or chat_data.get('msg', '未知错误')}")
-            return False
-        self.log('出行攻略问AI失败: 响应解析失败')
-        return False
 
     @staticmethod
     def get_task_progress(task):
@@ -1278,6 +1285,22 @@ class YP:
     def get_task_step_types(task):
         return set(task.get('stepTypeSet') or [])
 
+    @staticmethod
+    def dedupe_tasks(tasks):
+        """任务列表接口会返回重复任务，按 id 去重，避免同一任务被重复登记"""
+        seen = set()
+        unique_tasks = []
+        for task in tasks or []:
+            task_id = task.get('id')
+            if task_id is None:
+                unique_tasks.append(task)
+                continue
+            if task_id in seen:
+                continue
+            seen.add(task_id)
+            unique_tasks.append(task)
+        return unique_tasks
+
     def get_task_click_keys(self, task):
         task_id = task.get('id')
         currstep = task.get('currstep', 0)
@@ -1292,7 +1315,6 @@ class YP:
 
     def get_cloud_task_groups(self):
         return [
-            ('beiyong1', '\n🎁 五一福利任务'),
             ('cloudEmail', '\n📮 联动任务'),
             ('time', '\n✨ 新版热门任务'),
             ('day', '\n📆 云盘每日任务'),
@@ -1339,61 +1361,6 @@ class YP:
         self.log(f'-月上传任务进度: {current_process}/{target_count}')
         return False
 
-    def complete_mayday_memory_task(self, task):
-        target_count = 10
-        task_id = task.get('id', 587)
-        current_process = int(task.get('process') or 0)
-        remaining = max(0, target_count - current_process)
-        if remaining == 0:
-            return True
-        self.log(f'-开始补五一回忆上传: 当前{current_process}/{target_count}，还需{remaining}张')
-        success = 0
-        for _ in range(remaining):
-            if self.create_cloud_file('auto_mayday_', extension = 'jpg'):
-                success += 1
-        if success:
-            self.log(f'-五一回忆上传完成: {success}张')
-            self.click_task(task_id)
-        refreshed_task = self.query_cloud_task(task_id, 'beiyong1')
-        if not refreshed_task:
-            return False
-        refreshed_process = int(refreshed_task.get('process') or 0)
-        if refreshed_task.get('state') == 'FINISH' or refreshed_process >= target_count:
-            return True
-        self.log(f'-五一回忆任务进度: {refreshed_process}/{target_count}')
-        return False
-
-    def complete_holiday_nine_grid_task(self):
-        try:
-            encrypted_account = self.encrypt_ai_tool_account()
-        except ImportError:
-            self.log('生成假期九宫格失败: 缺少加密依赖')
-            return False
-        template_data = self.request_json(
-            'https://ad.mcloud.139.com/advertapi/adv-config/adv-config/AdInfoFilter/getAdInfos',
-            headers = self.build_ai_tool_ad_headers(),
-            data = {
-                'account': encrypted_account,
-                'adpostid': '66340',
-                'channel': '10000023',
-                'version': '10.5.0',
-                'client': 'iphone',
-            },
-            method = 'POST',
-        )
-        if not template_data:
-            self.log('生成假期九宫格失败: 模板接口无响应')
-            return False
-        if str(template_data.get('returnCode')) != '0':
-            self.log(f"生成假期九宫格失败: {template_data.get('returnMsg', '未知错误')}")
-            return False
-        click_data = self.click_task(589)
-        if click_data and str(click_data.get('code')) == '0':
-            return True
-        msg = click_data.get('msg', '未知错误') if click_data else '接口无响应'
-        self.log(f'生成假期九宫格失败: {msg}')
-        return False
-
     def get_cloud_tasklist_v2(self):
         for group, title in self.get_cloud_task_groups():
             return_data = self.request_market_json(f'{self.market_base_url}/market/signin/task/taskListV2', data = {
@@ -1407,7 +1374,7 @@ class YP:
             if return_data.get('code') != 0:
                 self.log(f"获取任务列表失败: {group} {return_data.get('msg', '未知错误')}")
                 continue
-            tasks = return_data.get('result', {}).get(group, [])
+            tasks = self.dedupe_tasks(return_data.get('result', {}).get(group, []))
             if not tasks:
                 continue
             self.log(title)
@@ -1465,66 +1432,6 @@ class YP:
             refreshed_task = self.query_cloud_task(task_id, group) or task
             self.log(f'-需手动完成: {task_name}{self.get_task_progress(refreshed_task)}')
             return
-        if task_id == 587:
-            self.log(f'-去完成: {task_name}')
-            if 'click' in self.get_task_step_types(task) and int(task.get('currstep') or 0) == 0:
-                click_data = self.click_task(task_id)
-                if not click_data or click_data.get('code') != 0:
-                    msg = click_data.get('msg', '未知错误') if click_data else '接口无响应'
-                    self.log(f'-任务登记失败: {task_name} {msg}')
-                    return
-            if self.complete_mayday_memory_task(task):
-                refreshed_task = self.query_cloud_task(task_id, group) or task
-                refreshed_name = self.strip_task_name(refreshed_task)
-                if refreshed_task.get('state') == 'FINISH':
-                    self.log(f'-已完成: {refreshed_name}')
-                else:
-                    self.log(f'-五一回忆已上传: {refreshed_name}{self.get_task_progress(refreshed_task)}')
-                return
-            refreshed_task = self.query_cloud_task(task_id, group) or task
-            self.log(f'-需手动完成: {task_name}{self.get_task_progress(refreshed_task)}')
-            return
-        if task_id == 588:
-            self.log(f'-去完成: {task_name}')
-            if 'click' in self.get_task_step_types(task) and int(task.get('currstep') or 0) == 0:
-                click_data = self.click_task(task_id)
-                if not click_data or click_data.get('code') != 0:
-                    msg = click_data.get('msg', '未知错误') if click_data else '接口无响应'
-                    self.log(f'-任务登记失败: {task_name} {msg}')
-                    return
-            if self.complete_travel_guide_ai_task():
-                refreshed_task = self.query_cloud_task(task_id, group) or task
-                refreshed_name = self.strip_task_name(refreshed_task)
-                if refreshed_task.get('state') == 'FINISH':
-                    self.log(f'-已完成: {refreshed_name}')
-                else:
-                    self.log(f'-出行攻略已生成: {refreshed_name}{self.get_task_progress(refreshed_task)}')
-                return
-            refreshed_task = self.query_cloud_task(task_id, group) or task
-            self.log(f'-需手动完成: {task_name}{self.get_task_progress(refreshed_task)}')
-            return
-        if task_id == 589:
-            self.log(f'-去完成: {task_name}')
-            if 'click' in self.get_task_step_types(task) and int(task.get('currstep') or 0) == 0:
-                click_data = self.click_task(task_id)
-                if not click_data or click_data.get('code') != 0:
-                    msg = click_data.get('msg', '未知错误') if click_data else '接口无响应'
-                    self.log(f'-任务登记失败: {task_name} {msg}')
-                    return
-            if self.complete_holiday_nine_grid_task():
-                refreshed_task = self.query_cloud_task(task_id, group) or task
-                refreshed_name = self.strip_task_name(refreshed_task)
-                if refreshed_task.get('state') == 'FINISH':
-                    self.log(f'-已完成: {refreshed_name}')
-                else:
-                    self.log(f'-假期九宫格已生成: {refreshed_name}{self.get_task_progress(refreshed_task)}')
-                return
-            refreshed_task = self.query_cloud_task(task_id, group) or task
-            self.log(f'-需手动完成: {task_name}{self.get_task_progress(refreshed_task)}')
-            return
-        if group == 'beiyong1':
-            self.log(f'-需手动完成: {task_name}{self.get_task_progress(task)}')
-            return
         if task_id == 406:
             self.complete_notice_task(task_name)
             return
@@ -1542,6 +1449,176 @@ class YP:
             return
         self.log(f'-需手动完成: {task_name}{self.get_task_progress(task)}')
 
+
+    # ==================== 新活动（依据 mCloud 13.2.2 云朵中心 H5）====================
+
+    def call_market_api(self, endpoint, params=None, data=None, method='GET'):
+        """云朵中心 H5 接口调用：H5 侧把 jwtToken 放在请求头，这里保持一致。"""
+        jwt = self.cookies.get('jwtToken') or self.jwtHeaders.get('jwtToken') or ''
+        headers = self.build_market_headers({
+            'jwtToken': jwt,
+            'showLoading': 'false',
+            'Content-Type': 'application/json;charset=UTF-8',
+        })
+        return self.request_json(f'{self.market_base_url}{endpoint}', headers = headers,
+                                 cookies = self.market_cookies, params = params, data = data,
+                                 method = method, retries = 2)
+
+    @staticmethod
+    def api_ok(data):
+        return bool(data) and str(data.get('code')) in ('0', '00', '000', '0000')
+
+    @staticmethod
+    def api_msg(data):
+        if not data:
+            return '接口无响应'
+        return data.get('msg') or data.get('message') or data.get('returnMsg') or '未知错误'
+
+    def describe_prizes(self, result, fallback='已领取'):
+        """把 receivePrize/click 返回的 result.prizes 整理成一行文本"""
+        if not isinstance(result, dict):
+            return fallback
+        prizes = result.get('prizes')
+        if isinstance(prizes, list) and prizes:
+            parts = []
+            for prize in prizes:
+                if not isinstance(prize, dict):
+                    continue
+                prize_name = prize.get('prizeName') or prize.get('name') or '奖品'
+                if prize.get('success') is False:
+                    parts.append(f'{prize_name}(发放失败: {prize.get("errorMsg") or "未知原因"})')
+                else:
+                    parts.append(f'{prize_name}✓')
+            if parts:
+                return '、'.join(parts)
+        return result.get('prizeName') or result.get('name') or fallback
+
+    def complete_tokenpk_activity(self):
+        """算力大作战 /ycloud/tokenpk/*（严格对齐 H5 状态机）
+
+        H5 逻辑（National_TokenPK 分包）：
+          state == WAIT    → RESERVE ? reserve() : click()   ← 只登记，**不领奖**
+          state == SUCCESS → RESERVE ? 略过 : receivePrize() ← 这一步才领奖
+          state == FINISH  → 任务已结束，跳链
+        教训：click 之后立刻 receivePrize，服务端一律回「奖品发放失败」。
+        """
+        market = TOKENPK_MARKET
+        # H5 页面加载时会先自动领取「阶段奖励」（算力进度达标送的抽奖次数）
+        auto = self.call_market_api('/ycloud/tokenpk/toplist/progress/autoReceiveLotteryChance',
+                                    method = 'POST')
+        if self.api_ok(auto):
+            chance = ((auto or {}).get('result') or {}).get('totalChance') or 0
+            if chance:
+                self.log(f'-自动领取阶段奖励: 抽奖次数 +{chance}')
+        data = self.call_market_api('/ycloud/tokenpk/task/list', params = {
+            'marketName': market, 'platform': 'ios', 'sortState': 'true'})
+        if not self.api_ok(data):
+            self.log(f'-算力大作战获取任务失败: {self.api_msg(data)}')
+            return
+        raw = data.get('result')
+        tasks = []
+        if isinstance(raw, list):
+            tasks = raw
+        elif isinstance(raw, dict):
+            for key in ('taskList', 'tasks', 'task', 'list'):
+                if isinstance(raw.get(key), list):
+                    tasks = raw[key]
+                    break
+        if not tasks:
+            self.log('-算力大作战: 当前无任务')
+            return
+        for task in self.dedupe_tasks(tasks):
+            if not isinstance(task, dict):
+                continue
+            task_id = task.get('id') or task.get('taskId')
+            name = self.strip_task_name(task) or str(task_id)
+            state = str(task.get('state') or task.get('status') or '').upper()
+            task_type = str(task.get('taskType') or '').upper()
+            key = task.get('ext') or task.get('key') or 'task'
+            # FINISH = 任务生命周期已结束（不是"已完成待领奖"）
+            if state in ('FINISH', 'RECEIVED', 'DONE', 'COMPLETE', 'CLOSED'):
+                self.log(f'-已完成: {name}')
+                continue
+            # SUCCESS = 服务端已确认达成 → 这里才是领奖时机
+            if state == 'SUCCESS':
+                if task_type == 'RESERVE':
+                    self.log(f'-已达成待领（预约类，次月发放）: {name}')
+                    continue
+                prize = self.call_market_api('/ycloud/tokenpk/task/step/receivePrize',
+                                             data = {'marketName': market, 'taskId': task_id, 'source': 'app'},
+                                             method = 'POST')
+                if self.api_ok(prize):
+                    self.log(f'-领奖成功: {name} → {self.describe_prizes(prize.get("result"))}')
+                else:
+                    code = (prize or {}).get('code')
+                    self.log(f'-领奖失败: {name} code={code} {self.api_msg(prize)}')
+                self.sleep()
+                continue
+            if state != 'WAIT':
+                self.log(f'-跳过（状态 {state or "未知"}）: {name}')
+                continue
+            body = {'marketName': market, 'taskId': task_id, 'key': key, 'source': 'app'}
+            if task_type == 'RESERVE':
+                action, step = '预约', self.call_market_api('/ycloud/tokenpk/task/step/reserve',
+                                                            data = body, method = 'POST')
+            else:
+                action, step = '登记', self.call_market_api('/ycloud/tokenpk/task/step/click',
+                                                            data = body, method = 'POST')
+            if not self.api_ok(step):
+                code = (step or {}).get('code')
+                self.log(f'-{action}失败: {name} code={code} {self.api_msg(step)}')
+                self.sleep()
+                continue
+            result = (step or {}).get('result')
+            if isinstance(result, dict) and result.get('prizes'):
+                self.log(f'-{action}并领取成功: {name} → {self.describe_prizes(result)}')
+            elif task_type == 'RESERVE':
+                self.log(f'-预约成功: {name}（次月登录后领取）')
+            else:
+                self.log(f'-{action}成功: {name}（待服务端确认，下次跑自动领奖）')
+            self.sleep()
+
+    def complete_live_flower_activity(self):
+        """直播间红花 /ycloud/liveRoomFeedback/*：用户信息 + 首次参与赠送"""
+        info = self.call_market_api('/ycloud/liveRoomFeedback/user/info', data = {}, method = 'POST')
+        if not self.api_ok(info):
+            self.log(f'-直播间红花: {self.api_msg(info)}')
+            return
+        result = info.get('result') or {}
+        if isinstance(result, dict):
+            flowers = result.get('redFlowerNum') or result.get('flowerNum') or result.get('num')
+            if flowers is not None:
+                self.log(f'-当前红花: {flowers}')
+        give = self.call_market_api('/ycloud/liveRoomFeedback/firstParticipate/give', data = {}, method = 'POST')
+        if self.api_ok(give):
+            self.log('-首次参与赠送: 已领取')
+        else:
+            self.log(f'-首次参与赠送: {self.api_msg(give)}')
+
+    def complete_mcloud_day_activity(self):
+        """云盘日 /ycloud/mcloudday/*：默认只读探测，链路确认后再放开动作"""
+        info = self.call_market_api('/ycloud/mcloudday/common/activityInfo',
+                                    params = {'marketName': MCLOUD_DAY_MARKET})
+        self.log(f"-云盘日活动信息: code={info.get('code') if info else '无响应'} "
+                 f"result={str((info or {}).get('result'))[:120]}")
+        record = self.call_market_api('/ycloud/mcloudday/blindbox/listCloudRecord')
+        self.log(f"-云盘日盲盒记录: code={record.get('code') if record else '无响应'} "
+                 f"result={str((record or {}).get('result'))[:120]}")
+
+    def run_new_activities(self):
+        """按开关执行新增活动；单个活动异常不影响其它活动"""
+        for enabled, title, func in (
+            (ENABLE_TOKENPK, '\n🧮 算力大作战', self.complete_tokenpk_activity),
+            (ENABLE_LIVE_FLOWER, '\n🌹 直播间红花', self.complete_live_flower_activity),
+            (ENABLE_MCLOUD_DAY, '\n📅 云盘日', self.complete_mcloud_day_activity),
+        ):
+            if not enabled:
+                continue
+            self.log(title)
+            try:
+                func()
+            except Exception as e:
+                self.log(f'-异常: {e}')
 
     def sleep(self, min_delay=1, max_delay=1.5):
         delay = random.uniform(min_delay, max_delay)
@@ -1561,13 +1638,16 @@ class YP:
         sso_data = self.request_json(sso_url, headers = sso_headers, data = sso_payload, method = 'POST')
         if not sso_data:
             self.log('刷新Token失败: 接口无响应')
+            self.auth_fail_reason = 'SSO 接口无响应'
             return None
-        if sso_data['success']:
+        if sso_data.get('success'):
             refresh_token = sso_data['data']['token']
             self.sso_token = refresh_token
             return refresh_token
         else:
-            self.log(f"刷新Token失败: {sso_data.get('message', '未知错误')}")
+            message = sso_data.get('message', '未知错误')
+            self.log(f"刷新Token失败: {message}")
+            self.auth_fail_reason = f'SSO 刷新Token失败: {message} (code={sso_data.get("code")})'
             return None
 
     def jwt(self):
@@ -1581,6 +1661,7 @@ class YP:
             jwt_data = self.request_json(jwt_url, headers = self.jwtHeaders, method = 'POST')
             if not jwt_data:
                 self.log('JWT获取失败: 接口无响应')
+                self.auth_fail_reason = 'JWT 接口无响应'
                 return False
             if jwt_data['code'] != 0:
                 self.log('-尝试强制刷新Authorization后重新获取JWT')
@@ -1588,14 +1669,17 @@ class YP:
                 token = self.sso()
                 if token is None:
                     self.log('-ck可能失效了')
+                    self.auth_fail_reason = 'ck 可能失效了（刷新后 SSO 仍无 token）'
                     return False
                 jwt_url = f"https://caiyun.feixin.10086.cn:7071/portal/auth/tyrzLogin.action?ssoToken={token}"
                 jwt_data = self.request_json(jwt_url, headers = self.jwtHeaders, method = 'POST')
                 if not jwt_data:
                     self.log('JWT获取失败: 接口无响应')
+                    self.auth_fail_reason = 'JWT 接口无响应（第二次）'
                     return False
             if jwt_data['code'] != 0:
                 self.log(f"JWT获取失败: {jwt_data['msg']}")
+                self.auth_fail_reason = f"JWT获取失败: {jwt_data['msg']}"
                 return False
             jwt_token = jwt_data['result']['token']
             self.jwtHeaders['jwtToken'] = jwt_token
@@ -1605,6 +1689,7 @@ class YP:
             return True
         else:
             self.log('-ck可能失效了')
+            self.auth_fail_reason = 'ck 可能失效了（SSO 未返回 token）'
             return False
 
     @catch_errors
@@ -1892,10 +1977,14 @@ class YP:
 
         try:
             for _ in range(self.click_num):
-                return_data = self.send_request(url = url, cookies = self.cookies, headers = self.jwtHeaders,
-                                                method = 'POST').json()
+                response = self.send_request(url = url, cookies = self.cookies, headers = self.jwtHeaders,
+                                             method = 'POST')
+                if response is None:
+                    print('❌摇一摇接口不可用，停止尝试')
+                    break
+                return_data = response.json()
                 time.sleep(1)
-                shake_prize_config = return_data["result"].get("shakePrizeconfig")
+                shake_prize_config = (return_data.get("result") or {}).get("shakePrizeconfig")
 
                 if shake_prize_config:
                     self.log(f"🎉摇一摇获得: {shake_prize_config['name']}")
@@ -1992,10 +2081,17 @@ class YP:
         if pending_amount:
             receive_headers = self.build_receive_headers()
             receive_cookies = dict(self.market_cookies)
-            receive_data = self.request_json(f'{self.market_base_url}/market/signin/page/receiveV2',
-                                             params = {'client': 'app'},
-                                             headers = receive_headers,
-                                             cookies = receive_cookies)
+            # 服务端偶发“活动太火爆，锁定失败”，短暂等待后重试
+            receive_data = None
+            for attempt in range(3):
+                receive_data = self.request_json(f'{self.market_base_url}/market/signin/page/receiveV2',
+                                                 params = {'client': 'app'},
+                                                 headers = receive_headers,
+                                                 cookies = receive_cookies)
+                if receive_data and receive_data.get('code') == 0:
+                    break
+                if attempt < 2:
+                    self.sleep(1.5, 2.5)
             if not receive_data:
                 self.log('领取云朵失败: 接口无响应')
                 self.log(f'-当前待领取:{pending_amount}云朵')
