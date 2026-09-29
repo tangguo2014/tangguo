@@ -25,8 +25,8 @@ except ImportError:
     sys.exit(1)
 
 """
-名称：花生日记APP 张哥解密版
-说明：签到 + 浏览 + 查资产 + 天天乐抽奖码
+名称：花生日记APP 自动化任务
+说明：签到 + 3个浏览任务自动领奖 + 查资产 + 天天乐日常做任务（全任务15s+延时与间隔优化）
 变量：hsrj_gpt （格式：备注#Token，多账号用 & 或换行分割）
 推送：QYWX_KEY
 定时：cron 20 8 * * *
@@ -101,7 +101,7 @@ def post_encrypted(path, token, payload_dict):
     
     url = BASE_H5 + path
     try:
-        res = requests.post(url, headers=headers, data=data, timeout=15).json()
+        res = requests.post(url, headers=headers, data=data, timeout=20).json()
         if res.get("status") == 200 and res.get("data"):
             plain_data = aes_decrypt(key, str(res["data"]))
             res["data"] = plain_data
@@ -109,17 +109,15 @@ def post_encrypted(path, token, payload_dict):
     except Exception as e:
         return {"status": -1, "msg": str(e)}
 
-# ================= 2. 消息通知（兼容微信端直接展示） =================
+# ================= 2. 消息通知 =================
 def send_msg(title, content):
     print(f"\n{'='*20} 📢 发送通知 {'='*20}")
-    print(f"【{title}】\n{content}")
+    print(content)
     if not PUSH_KEY:
         print("⚠️ 未配置 QYWX_KEY，跳过企业微信通知。")
         return
 
     url = PUSH_KEY if "qyapi.weixin.qq.com" in PUSH_KEY else f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={PUSH_KEY}"
-    
-    # 去除 Markdown 标记符号，确保微信端正常呈现为纯文本卡片
     plain_content = content.replace("**", "").replace("`", "")
 
     payload = {
@@ -154,7 +152,7 @@ def extract_all_tasks(raw_obj):
 def handle_peanut_coin(token):
     print("\n  [模块 1] 处理花生币打卡与每日浏览任务...")
     
-    today_sign_income = 20  # 默认签到收益
+    today_sign_income = 20
     
     # 1. 每日签到
     sign_res = post_encrypted("/user/task/signIn", token, {"token": token})
@@ -172,7 +170,12 @@ def handle_peanut_coin(token):
     else:
         sign_status = "ℹ️ 今日已签过"
 
-    # 2. 深度拉取任务列表，完整执行：浏览等待 -> completeTask -> receiveTaskCoins
+    # 签到与后续浏览任务之间停顿 3~5 秒
+    sign_interval = random.uniform(3.0, 5.0)
+    print(f"  ☕ 签到完毕，间隔等待 {sign_interval:.1f} 秒后拉取浏览任务...")
+    time.sleep(sign_interval)
+
+    # 2. 深度拉取任务列表，完整执行：浏览等待(15s+) -> completeTask -> receiveTaskCoins
     candidate_tasks = []
     completed_task_ids = set()
     try:
@@ -195,7 +198,7 @@ def handle_peanut_coin(token):
 
         print(f"  📋 识别到每日浏览任务共 {len(candidate_tasks)} 个")
 
-        for t in candidate_tasks:
+        for idx, t in enumerate(candidate_tasks, 1):
             tid = t.get("taskId") or t.get("id")
             tname = t.get("taskName") or t.get("title") or f"任务-{tid}"
             t_status = t.get("status") if t.get("status") is not None else t.get("taskStatus")
@@ -203,8 +206,9 @@ def handle_peanut_coin(token):
             if t_status in [1, 2, "1", "2"] or t.get("completed") is True:
                 completed_task_ids.add(tid)
 
-            wait_sec = random.randint(8, 12) if tid == 82 else random.randint(5, 7)
-            print(f"  ⏳ 正在模拟浏览: 【{tname}】(ID: {tid})，随机等待 {wait_sec} 秒...")
+            # 所有浏览任务均严格大于 15 秒（任务 82 适当加长至 18~22 秒，其余 16~20 秒）
+            wait_sec = random.randint(18, 22) if tid == 82 else random.randint(16, 20)
+            print(f"  ⏳ [{idx}/{len(candidate_tasks)}] 正在模拟浏览: 【{tname}】(ID: {tid})，随机等待 {wait_sec} 秒...")
             time.sleep(wait_sec)
 
             # 步骤 A：提交完成任务
@@ -212,7 +216,7 @@ def handle_peanut_coin(token):
                 "taskId": tid,
                 "token": token
             })
-            time.sleep(1.5)
+            time.sleep(2)
 
             # 步骤 B：领取金币奖励入账
             recv_res = post_encrypted("/user/task/receiveTaskCoins", token, {
@@ -231,9 +235,10 @@ def handle_peanut_coin(token):
                 print(f"  ℹ️ 任务【{tname}】今日已完成并领过金币")
                 completed_task_ids.add(tid)
             elif "不是已完成" in r_msg:
-                print(f"  ⚠️ 任务【{tname}】返回未完成，尝试补充提交...")
-                time.sleep(2)
+                print(f"  ⚠️ 任务【{tname}】返回未完成，额外浏览 6 秒后补充提交...")
+                time.sleep(6)
                 post_encrypted("/user/task/completeTask", token, {"taskId": tid, "token": token})
+                time.sleep(1.5)
                 retry_recv = post_encrypted("/user/task/receiveTaskCoins", token, {"taskId": tid, "token": token})
                 if retry_recv.get("status") == 200 or "已领取" in str(retry_recv.get("msg", "")):
                     print(f"  ✅ 任务【{tname}】补充提交后金币入账成功！")
@@ -243,13 +248,16 @@ def handle_peanut_coin(token):
             else:
                 print(f"  ⚠️ 任务【{tname}】状态: {r_msg}")
 
-            time.sleep(random.uniform(1.2, 2.0))
+            # 任务之间间隔 3~6 秒
+            task_interval = random.uniform(3.0, 6.0)
+            print(f"  ☕ 任务完成，随机停顿 {task_interval:.1f} 秒...")
+            time.sleep(task_interval)
 
     except Exception as e:
         print(f"  ⚠️ 执行浏览任务异常: {e}")
 
     # 3. 通过 getUserCoin 查询最新资产与今日总收益
-    total_coins = "200"
+    total_coins = "未同步"
     api_today_coin = None
     try:
         coin_res = post_encrypted("/user/task/getUserCoin", token, {"token": token})
@@ -260,12 +268,12 @@ def handle_peanut_coin(token):
                     if key in cd and cd[key] is not None:
                         total_coins = str(cd[key])
                         break
-                if "todayCoin" in cd and cd["todayCoin"]:
+                if "todayCoin" in cd and cd["todayCoin"] is not None:
                     api_today_coin = int(cd["todayCoin"])
             elif isinstance(cd, (int, str)):
                 total_coins = str(cd)
 
-        if total_coins == "200":
+        if total_coins == "未同步":
             sign_info = post_encrypted("/user/task/getSignInfo", token, {"token": token})
             if sign_info.get("status") == 200:
                 sd = sign_info.get("data", {})
@@ -274,12 +282,12 @@ def handle_peanut_coin(token):
                         if key in sd and sd[key] is not None:
                             total_coins = str(sd[key])
                             break
-                    if "todayCoin" in sd and sd["todayCoin"]:
+                    if "todayCoin" in sd and sd["todayCoin"] is not None:
                         api_today_coin = int(sd["todayCoin"])
     except Exception as e:
         print(f"  ⚠️ 查询资产异常: {e}")
 
-    # 4. 计算今日总收益（浏览任务固定每个 20 币）
+    # 4. 计算今日总收益
     total_target = len(candidate_tasks) if candidate_tasks else 3
     final_done = len(completed_task_ids)
     if final_done > total_target:
@@ -288,14 +296,13 @@ def handle_peanut_coin(token):
     if api_today_coin is not None:
         today_total_income = api_today_coin
     else:
-        # 签到所得 + 浏览实际完成数 * 20
         today_total_income = today_sign_income + (final_done * 20)
 
     return sign_status, final_done, total_target, today_total_income, total_coins
 
-# ================= 4. 天天乐业务（日常做任务） =================
+# ================= 4. 天天乐业务（全任务15s+真实耗时与防封间隔） =================
 def handle_ttl_tasks(token):
-    print("\n  [模块 2] 处理花生天天乐日常任务...")
+    print("\n  [模块 2] 处理花生天天乐日常任务（全任务 15s+ 模拟）...")
     headers = {
         "token": token,
         "User-Agent": UA_ANDROID,
@@ -310,7 +317,7 @@ def handle_ttl_tasks(token):
     
     def post_act(path, fields):
         try:
-            return requests.post(BASE_H5 + path, headers=headers, data=fields, timeout=12).json()
+            return requests.post(BASE_H5 + path, headers=headers, data=fields, timeout=15).json()
         except Exception:
             return None
 
@@ -334,28 +341,44 @@ def handle_ttl_tasks(token):
             bets = r["data"].get("betNumbersList", [])
             new_bets += len(bets)
             print(f"  🎫 天天乐签到获得: {bets}")
-    time.sleep(1)
+    
+    time.sleep(random.uniform(3.0, 5.0))
 
-    # 2. 视频任务
+    # 2. 视频广告任务（激励视频广告：严格模拟观看 20~26 秒）
     t6 = task_map.get(6, {})
     remain_ad = max(0, (t6.get("limitCount", 3) or 3) - (t6.get("completedCount", 0) or 0))
     for idx in range(remain_ad):
+        ad_wait = random.randint(20, 26)
+        print(f"  📺 正在播放激励视频广告 [{idx+1}/{remain_ad}]，模拟观看 {ad_wait} 秒...")
+        time.sleep(ad_wait)
         r = post_act("/actEveryDay/completeAdTask", {"issueNo": issue, "token": token})
         if r and r.get("data"):
             bets = r["data"].get("betNumbersList", [])
             new_bets += len(bets)
             print(f"  🎫 视频任务 [{idx+1}/{remain_ad}] 成功，获得奖码: {bets}")
-        time.sleep(2)
+        
+        # 视频之间间隔 4~6 秒
+        ad_gap = random.uniform(4.0, 6.0)
+        print(f"  ☕ 视频播放完毕，休息 {ad_gap:.1f} 秒...")
+        time.sleep(ad_gap)
 
-    # 3. 逛商城任务
+    # 3. 逛商城任务（模拟浏览 16~20 秒）
+    mall_wait = random.randint(16, 20)
+    print(f"  🛒 正在浏览商城专区，模拟等待 {mall_wait} 秒...")
+    time.sleep(mall_wait)
     r_mall = post_act("/actEveryDay/finishWatchTask", {"taskType": "22", "token": token})
     if r_mall and r_mall.get("data"):
         bets = r_mall["data"].get("betNumbersList", [])
         new_bets += len(bets)
         print(f"  🎫 逛商城完成，获得奖码: {bets}")
-    time.sleep(1)
 
-    # 4. 京东任务
+    # 任务之间间隔 3~5 秒
+    time.sleep(random.uniform(3.0, 5.0))
+
+    # 4. 京东会场任务（模拟浏览 15~18 秒）
+    jd_wait = random.randint(15, 18)
+    print(f"  📱 正在浏览京东特惠会场，模拟等待 {jd_wait} 秒...")
+    time.sleep(jd_wait)
     r_jd = post_act("/actEveryDay/completeFlTask", {"issueNo": issue, "taskCode": "7", "token": token})
     if r_jd and r_jd.get("data"):
         bets = r_jd["data"].get("betNumbersList", [])
@@ -389,7 +412,12 @@ def main():
         # 1. 签到 + 浏览两步领奖 + 总资产与今日总收益计算
         sign_status, done_cnt, target_cnt, today_income, total_coins = handle_peanut_coin(token)
         
-        # 2. 天天乐日常做任务
+        # 模块之间间隔 4~6 秒
+        module_gap = random.uniform(4.0, 6.0)
+        print(f"  ☕ 花生币模块结束，停顿 {module_gap:.1f} 秒进入天天乐...")
+        time.sleep(module_gap)
+
+        # 2. 天天乐日常做任务（全任务 15s+ 且带间隔）
         issue_period, ttl_bets = handle_ttl_tasks(token)
 
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -413,8 +441,8 @@ def main():
 ━━━━━━━━━━━━━━━━━━━━"""
         
         summary.append(report)
-        print(f"✅ 账号【{remark}】处理完毕，等待 2 秒...")
-        time.sleep(2)
+        print(f"✅ 账号【{remark}】处理完毕，等待 3 秒进入下一账号...")
+        time.sleep(3)
 
     if summary:
         send_msg("🥜花生日记🥜", "\n\n".join(summary))
