@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-脚本名称: 钻石矿场每日全自动任务，信息自动脱敏
+脚本名称: 钻石矿场每日全自动任务自动脱敏
 链接地址: https://tj.hqlmapp.com/plugin.php?id=orange_down&x=164370
 功能实现: 签到 -> 收益领取 -> 雇佣矿工 -> 资产核对 -> 推送
 环境变量: zskc_gpt = 备注#账号#密码 (多账号支持换行或 & 分隔，无备注时可直接传 账号#密码)
 定时建议: cron 20 8,20 * * * (每天二次自行修改)
-安装依赖：requests
+安装依赖: requests
 """
 
 import os
@@ -88,16 +88,17 @@ class DiamondMiner:
 
     @staticmethod
     def _extract_system_message(html):
-        """从 Discuz! 提示框中提取响应文案"""
+        """从 Discuz! 提示框中提取响应文案（过滤尾部跳转 URL）"""
         patterns = (
             r"<div class=\"toast\">(.*?)</div>",
-            r"showerror\('(.*?)'\)",
-            r"showright\('(.*?)'\)"
+            r"showerror\('(.*?)'(?:,|\))",
+            r"showright\('(.*?)'(?:,|\))"
         )
         for pattern in patterns:
             match = re.search(pattern, html, re.S)
             if match:
-                return re.sub(r"<[^>]+>", "", match.group(1)).strip()
+                text = re.sub(r"<[^>]+>", "", match.group(1)).strip()
+                return text.replace("'", "").replace('"', "")
         return ""
 
     @staticmethod
