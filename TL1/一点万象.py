@@ -5,13 +5,18 @@ APP：一点万象    签到 + 免费抽奖
     （只抽一次，后两次需要积分默认关闭）
 变量：ydwx_gpt=备注#token#deviceParams（多账号&分割或换行）数据在请求体
 定时：cron 0 6 * * * 每天一次，自行修改
-解密：md5+SECRET，密钥
+
+签名：Frameworks/MCFoundationKitModule.framework 
+  算法与 H5 相同：md5( sorted "k=v&" 拼接 + SECRET )
+  旧版 H5 签名（68a91a5b… / P@Gkbu0shTNHjhM!7F / platform=h5）已弃用——
+  App 登录得到的 token 用 H5 特征请求会被判 30012 账户异常。
 
 """
 import json, os, sys, time, base64, hashlib, random, subprocess, urllib.parse, urllib.request
 
-APPID = '68a91a5bac6a4f3e91bf4b42856785c6'
-SECRET = 'P@Gkbu0shTNHjhM!7F'
+APPID = 'ff93ace3ed344e7392ed669e7c3ade61'     # App 原生 appId（反汇编 MCFoundationKitModule 得到）
+SECRET = 'ySd8qSgZ8#!12OL*Xu'                  # App 原生签名密钥（已在 4 条真实抓包上验证）
+PLATFORM = 'iOS'                               # App 原生是 iOS，不是 h5
 GATEWAY = 'https://app.mixcapp.com/mixc/gateway'
 UA = 'mixc/4.3.0 (iPhone; iOS 16.3; Scale/3.00)'
 API_VERSION = '1.0'
@@ -39,7 +44,7 @@ def build(token, device, mall, action, params=None, lottery=False):
     if ms % 1000 == 0:            # 容器时间被截断到秒 → 补随机毫秒，避免毫秒恒为 000
         ms += random.randint(1, 999)
     ts = str(ms + TIME_OFFSET)
-    q = {'mallNo': mall, 'action': action, 'appId': APPID, 'platform': 'h5',
+    q = {'mallNo': mall, 'action': action, 'appId': APPID, 'platform': PLATFORM,
          'imei': '542AD5BC-6E97-4639-BE39-55F8D9517389', 'appVersion': '4.3.0',
          'osVersion': '16.3', 'apiVersion': API_VERSION, 'timestamp': ts,
          'deviceParams': device, 'params': _q(params), 'token': token}
@@ -102,8 +107,19 @@ def available_point(token, device, mall):
     return (d.get('bindCard') or {}).get('availablePoint')
 
 
-def sign_in(token, device, mall):
+def sign_in(token, device, mall, retry_30012=True):
+    """签到。30012（账户异常）实测是暂时性的：
+    09:2x 失败，09:4x 同参数成功。所以遇到 30012 分段重试。
+    等待序列 60s → 120s → 180s，共 4 次请求。"""
     r = api(token, device, mall, 'mixc.app.memberSign.point.sign', {})
+    if not retry_30012:
+        return r
+    for wait in (60, 120, 180):
+        if str(r.get('code')) != '30012':
+            break
+        print('   ⏳ 30012 账户异常（暂时性），%d 秒后重试…' % wait)
+        time.sleep(wait)
+        r = api(token, device, mall, 'mixc.app.memberSign.point.sign', {})
     return r
 
 
@@ -130,16 +146,22 @@ def lottery_free(token, device, mall, sale_id):
     left = int(d.get('availableLotteryOpportunityNum') or 0)
     out['chance'] = left
     if left <= 0:
-        out['skip'] = '今日次数已用完'
+        out['skip'] = '今日 3 次机会已全部用完'
         return out
     free_left = left >= DAILY_CHANCE if DAILY_CHANCE else left > 0
     if not free_left and not ALLOW_PAID:
-        out['skip'] = '免费次数已用完（剩 %s 次需 %s 星/次，默认不抽）' % (left, d.get('point') or 9)
+        out['skip'] = '免费次数已用（今日剩 %s/3 次，每次需 %s 星，默认不抽）' % (left, d.get('point') or 9)
         return out
     before = get_point(token, device, mall)[0]
+    out['chance_before'] = left
+    print('   🎰 发起抽奖：机会 %d/3（第 1 次免费）' % left)
     r = api(token, device, mall, 'mixc.app.lottery.do',
             {'mallNo': mall, 'saleId': sale_id, 'inviteCode': ''}, lottery=True)
     after = get_point(token, device, mall)[0]
+    # 抽完再查一次剩余机会
+    r2 = api(token, device, mall, 'mixc.app.lottery.detail',
+             {'mallNo': mall, 'saleId': sale_id}, lottery=True)
+    out['chance_after'] = int(((r2.get('data') or {}).get('availableLotteryOpportunityNum')) or 0)
     d = r.get('data') or {}
     if str(r.get('code')) != '0':
         out['err'] = r.get('message') or str(r.get('code'))
@@ -176,8 +198,7 @@ NOTIFY_TITLE = '万象城签到🙋‍♀️'
 
 
 def send_msg(title, content):
-    """企业微信机器人推送（QYWX_KEY），失败只打印不抛错"""
-    print('【通知】%s\n%s' % (title, content))
+    """企业微信机器人推送（QYWX_KEY）；正文已由 main 打印，这里不再重复"""
     key = os.environ.get('QYWX_KEY') or ''
     if not key:
         print('⚠️ 提示：未在环境变量配置 QYWX_KEY，跳过通知发送。')
@@ -291,8 +312,8 @@ def run_account(acc):
                     lines.append('📅 连续签到 %s 天 · 今日 +%s 星' % (days2, today2))
                 elif '频繁' in msg:
                     lines.append('📝 状态：⚠️ 请求频繁（冷却中，稍后重跑）')
-                elif code == 30012:
-                    lines.append('📝 状态：❌ 签到未成功，返回 30012（回查 canSign=0，非误报）')
+                elif str(code) == '30012':
+                    lines.append('📝 状态：❌ 签到未成功，30012 重试 3 次仍失败（账户异常，可能需稍后手动跑）')
                 elif '授权' in msg or 'token' in msg.lower():
                     lines.append('📝 状态：❌ token 失效（%s）' % msg)
                 else:
@@ -328,8 +349,10 @@ def run_account(acc):
         ptype = str(lot.get('prize_type'))
         icon = '🎉' if ptype == '500' else ('🎟️' if ptype == '505' else '😅')
         cost = lot.get('cost') or 0
-        lines.append('🎰 抽奖：%s %s（%s，剩余 %s 次）' % (
-            icon, lot.get('prize'), '消耗 %s 星' % cost if cost else '本次免费', lot.get('chance')))
+        cb = lot.get('chance_before')
+        ca = lot.get('chance_after')
+        tag = '扣 %s 星' % cost if cost else '免费'
+        lines.append('🎰 抽奖：%s %s（%s，今日机会 %s/3 → %s/3）' % (icon, lot.get('prize'), tag, cb, ca))
         ledger_add(acc['name'], lot.get('prize') or '', ptype, cost, lot.get('time'))
         if lot.get('after') is not None:
             lines.append('💰 可用积分：%s' % lot.get('after'))
