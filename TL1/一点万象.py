@@ -7,9 +7,9 @@ APP：一点万象    签到 + 免费抽奖
 定时：cron 0 6 * * * 每天一次，自行修改
 
 签名：Frameworks/MCFoundationKitModule.framework 
-  算法与 H5 相同：md5( sorted "k=v&" 拼接 + SECRET )
-  旧版 H5 签名（68a91a5b… / P@Gkbu0shTNHjhM!7F / platform=h5）已弃用——
-  App 登录得到的 token 用 H5 特征请求会被判 30012 账户异常。
+     算法与 H5 相同：md5( sorted "k=v&" 拼接 + SECRET )
+     旧版 H5 签名（68a91a5b… / P@Gkbu0shTNHjhM!7F / platform=h5）已弃用——
+     App 登录得到的 token 用 H5 特征请求会被判 30012 账户异常。
 
 """
 import json, os, sys, time, base64, hashlib, random, subprocess, urllib.parse, urllib.request
