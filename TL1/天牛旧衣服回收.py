@@ -38,7 +38,7 @@ def mask_mobile(mobile):
 
 def get_info(token):
     """获取用户信息接口"""
-    url = 'https://tianniu.fzjingzhou.com/api/Person/index'
+    url = 'https://tianniunew.fzjingzhou.com/api/Person/index'
     headers = {"content-type": "application/x-www-form-urlencoded", "platform": "MP-WEIXIN"}
     try:
         res = requests.post(url, headers=headers, data=f'token={token}', timeout=10).json()
@@ -61,7 +61,7 @@ def tn_run(name, token):
     
     print(f"【{name}】2. 发起签到请求...")
     try:
-        sign_res = requests.post('https://tianniu.fzjingzhou.com/api/Person/sign', headers=headers, data=f'token={token}', timeout=10).json()
+        sign_res = requests.post('https://tianniunew.fzjingzhou.com/api/Person/sign', headers=headers, data=f'token={token}', timeout=10).json()
         sign_msg = sign_res.get("msg", "未知")
         print(f"   ∟ 结果: {sign_msg}")
     except:
