@@ -2,22 +2,16 @@
 # -*- coding: utf-8 -*-
 """
 APP：一点万象    签到 + 免费抽奖（每日首抽免费）
+    （只抽一次，后两次需要积分默认关闭）
 变量：ydwx_gpt=备注#token#deviceParams（多账号 & 或换行分隔）数据在请求体
 定时：cron 0 6 * * * 每天一次，自行修改
 
-================= 2026-11-12 修正（基于真实 HAR 实测） =================
-签名：App 实际走 platform=h5 + appId 68a91a5b… + SECRET P@Gkbu0shTNHjhM!7F
-      抓包里 lottery.do / member.basicInfo 全部是 platform=h5，不是 iOS。
-      旧注释说「App 原生 iOS 签名 ySd8qSgZ8#!12OL*Xu」与实际抓包不符，已改回 h5。
+================= 2026-11-12 修正 =================
+签名：App platform=h5 + appId 68a91a5b… + SECRET P@Gkbu0shTNHjhM!7F
 
 抽奖次数：**不是** lottery.detail 里的 availableLotteryOpportunityNum（该字段不存在，永远是 None）
           正确的接口是 mixc.app.lottery.opportunity → data = 今日剩余次数（3/2/1/0）
           lottery.detail 里 usedNum 是 null，freeCount 也不存在。
-
-免费规则：每天 3 次机会，**只有第 1 次免费**。
-          opportunity 返回 3 → 本次免费
-          返回 2/1  → 再抽要扣 9 星（默认不抽，ALLOW_PAID 控制）
-          返回 0    → 今日用完
 
 积分：只认 member.basicInfo.point（实测 point == bindCard.availablePoint，及时更新）
       签到返回的 point 是本次应得，remaindPoints 是服务端参考值，均不当作余额
