@@ -1,8 +1,11 @@
 /**
- * 平安 i 动 · 签到 + 饮食打卡 + litta 训练课程（YYB 全自动）
+ * 
+ * vx小程序 平安 i 动 
+ *        目前只有 签到 + 饮食打卡 +挑战盲盒
  *
  * 【变量】
- *   yyb_gpt = YYB地址#ref        多账号 & 或换行
+ *   yyb_gpt = YYB地址#ref  http://256.17.0.26:8000#1     
+ *             多账号 & 或换行
  *
  * 【流程】
  *   1. YYB 取 wx.login code（appid wx340f915763f3ed2b）
@@ -13,10 +16,6 @@
  *   6. 饮食打卡（uploadText → batchRecordFoodLog → claimReward 三步）
  *   7. litta 训练课程（上报课时长 ≥180s → 领 10 健康币）
  *   8. 余额汇总 + 推送
- *
- * 【litta lk-sign 算法】（参考 YYB-GO-Script-i/平安i运动code8.2）
- *   SHA1(sortedLkHeaders + "secret=jqwei2uhEbcvaxDoi8hHs19&data=" + JSON.stringify(body)).toUpperCase()
- *   lk-ssotoken 不参与签名（签名前删除、签名后恢复）
  *
  * 【推送】企业微信 QYWX_KEY，60 秒超时
  */
