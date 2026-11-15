@@ -1,12 +1,14 @@
 /**
  * 
  * vx小程序 平安 i 动 
- *        目前只有 签到 + 饮食打卡 +挑战盲盒
+ *   目前只有 签到 + 饮食打卡 +挑战盲盒
+ *   由于token时效短，没有做缓存，每次登录yyb取码
  *
  * 【变量】
  *   yyb_gpt = YYB地址#ref  http://256.17.0.26:8000#1     
  *             多账号 & 或换行
- *
+ * 【定时】
+ *    cron 26 7 * * * 每天一次自行修改
  * 【流程】
  *   1. YYB 取 wx.login code（appid wx340f915763f3ed2b）
  *   2. RSA 加密 → 平台 login → AES 解密拿 authToken/signKey/degradeToken/userInfo
