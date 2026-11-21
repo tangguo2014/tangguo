@@ -90,6 +90,30 @@ def mask_user(u):
     return (u[0] + '***') if len(u) <= 4 else (u[:2] + '****' + u[-2:])
 
 
+# ======================= DNS 兜底 =======================
+# 青龙容器内置 DNS(127.0.0.11) 短时间多次解析会报 Errno -3
+# 这里把域名直接钉到 IP，绕过系统 DNS
+HOST_IP_MAP = {'ta.gnx3.cn': '42.193.198.209'}
+
+try:
+    import socket as _socket
+    _ORIG_GETADDRINFO = _socket.getaddrinfo
+
+    def _patched_getaddrinfo(host, port, *args, **kwargs):
+        ip = HOST_IP_MAP.get(host)
+        if ip and isinstance(port, int):
+            # 直接构造结果，完全不查 DNS
+            return [(2, 1, 6, '', (ip, port)),          # AF_INET  SOCK_STREAM TCP
+                    (2, 2, 17, '', (ip, port)),         # AF_INET  SOCK_DGRAM  UDP
+                    (2, 3, 0, '', (ip, port))]
+        return _ORIG_GETADDRINFO(host, port, *args, **kwargs)
+
+    _socket.getaddrinfo = _patched_getaddrinfo
+    print('[DNS] 已启用 IP 兜底:', HOST_IP_MAP)
+except Exception as _e:
+    print('[DNS] 兜底未启用:', _e)
+
+
 # ======================= 会话 =======================
 class Session:
     """带 cookie 管理的会话。关键：已有 cookie 不覆盖，避免会话被冲掉"""
