@@ -1,5 +1,5 @@
 """
-微信小程序：旧衣客回收 V1.1
+微信小程序：旧衣客回收 V1.2
 功能设定：每日自动签到 + 5次广告任务全自动化
 定时建议：cron 30 8 * * * 每天一次自己修改
 变量格式：Jyk_gpt = 备注#Authorization 
@@ -9,6 +9,7 @@
 import os
 import sys
 import time
+import random
 import requests
 
 try:
@@ -53,9 +54,9 @@ def get_headers(token):
         "Connection": "keep-alive",
         "content-type": "application/json",
         "Authorization": f"Bearer {auth_token}",
-        "X-Payconfig-Id": "2",
+        "X-Payconfig-Id": "1",
         "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.76(0x18004c3a) NetType/4G Language/zh_CN",
-        "Referer": "https://servicewechat.com/wx3f0209cc35a953a4/104/page-frame.html"
+        "Referer": "https://servicewechat.com/wx72aff89606e0f9d2/6/page-frame.html"
     }
 
 def get_home_info(headers):
@@ -90,15 +91,18 @@ def do_common_sign(headers, is_ad_day=False):
         print("    [!] 今日为周期广告签到日，准备获取广告票据...")
         ad_token = fetch_ad_token(headers)
         if ad_token:
-            print("        -> 模拟广告播放中，等待 17 秒...")
-            time.sleep(17)
+            wait_ad = round(random.uniform(16.0, 17.5), 1)
+            print(f"        -> 模拟广告播放中，等待 {wait_ad} 秒...")
+            time.sleep(wait_ad)
             payload = {"ad_token": ad_token}
+        else:
+            print("        × 获取 ad_token 失败，将尝试无票据提交")
 
     try:
         res = requests.post(COMMON_SIGN_URL, headers=headers, json=payload, timeout=15)
         res_json = res.json()
         errno = res_json.get("errno")
-        msg = res_json.get("message", "")
+        msg = res_json.get("message") or res_json.get("error") or ("errno=%s" % res_json.get("errno"))
 
         if errno == 0:
             data = res_json.get("data", {})
@@ -111,8 +115,9 @@ def do_common_sign(headers, is_ad_day=False):
             print("    [!] 服务端提示需要广告凭据，正在补领并模拟播放...")
             ad_token = fetch_ad_token(headers)
             if ad_token:
-                print("        -> 模拟广告播放中，等待 17 秒...")
-                time.sleep(17)
+                wait_ad = round(random.uniform(16.0, 17.5), 1)
+                print(f"        -> 模拟广告播放中，等待 {wait_ad} 秒...")
+                time.sleep(wait_ad)
                 retry_res = requests.post(COMMON_SIGN_URL, headers=headers, json={"ad_token": ad_token}, timeout=15).json()
                 if retry_res.get("errno") == 0:
                     data = retry_res.get("data", {})
@@ -130,7 +135,7 @@ def do_single_ad_sign(headers, ad_token):
         res = requests.post(AD_SIGN_URL, headers=headers, json={"ad_token": ad_token}, timeout=15)
         res_json = res.json()
         errno = res_json.get("errno")
-        msg = res_json.get("message", "")
+        msg = res_json.get("message") or res_json.get("error") or ("errno=%s" % res_json.get("errno"))
 
         if errno == 0:
             data = res_json.get("data", {})
@@ -172,9 +177,10 @@ def run_ad_tasks(headers, ad_data):
             print("        × 获取 ad_token 失败，跳出广告任务")
             break
 
-        # 2. 模拟广告播放 17 秒
-        print("        -> 模拟广告播放中，等待 17 秒...")
-        time.sleep(17)
+        # 2. 模拟广告播放：随机 16~17 秒（服务端要求 >=15 秒）
+        wait_ad = round(random.uniform(16.0, 17.5), 1)
+        print(f"        -> 模拟广告播放中，等待 {wait_ad} 秒...")
+        time.sleep(wait_ad)
 
         # 3. 提交销账领奖
         ok, amount, current_cnt, lim, info = do_single_ad_sign(headers, token)
@@ -189,10 +195,11 @@ def run_ad_tasks(headers, ad_data):
             print(f"        × 第 {idx} 轮提交失败: {info}")
             break
 
-        # 4. 任务间隔缓冲 2.5 秒
+        # 4. 任务间隔缓冲：随机 2~3 秒
         if cur_done < limit:
-            print("        -> 任务冷却间隔 2.5 秒...")
-            time.sleep(2.5)
+            wait_gap = round(random.uniform(2.0, 3.0), 1)
+            print(f"        -> 任务冷却间隔 {wait_gap} 秒...")
+            time.sleep(wait_gap)
 
     return success_times, total_gained, cur_done
 
@@ -215,6 +222,11 @@ def process_account(index, total, tag, token):
         if d.get("day_index") == day_index:
             is_ad_day = (d.get("ad_enabled") == 1)
             break
+    if days_list:
+        print(f"    周期规则: " + " / ".join(
+            "第%s天%s" % (d.get("day_index"), "(广告)" if d.get("ad_enabled") == 1 else "")
+            for d in days_list))
+        print(f"    今日基础签到类型: {'广告签到' if is_ad_day else '普通签到'}")
 
     # 3. 执行基础签到
     print("[2] 正在处理基础签到...")
