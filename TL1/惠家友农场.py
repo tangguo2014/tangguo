@@ -2,21 +2,26 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-vx小程序 惠家友.农场 签到 / 浇水 / 收雨水 / 任务
+vx小程序 惠家友.农场 签到 / 浇水 / 收雨水 / 任务/ 偷水
 ================================================================================
 
 【变量】
     hjync_gpt = 备注#token
-              从抓包 请求体里的 api_token 字段
-              例：fe259796b6fc40a995edfc70ccae0ad47b99013d7d544791a1e538b1dda0dfa3
-    多账号：& 或换行分隔
+             从抓包 请求体里的 api_token 
+             多账号：& 或换行分隔
 
 【可选】
-    HJC_WATER = 6  可选，浇水次数，默认6次
     HJC_TASKS   默认 all（签到,浇水,收水,任务）
-                例：HJC_TASKS=sign,water  只做签到和浇水
+          例：HJC_TASKS=sign,water  只做签到和浇水
+
+【签名算法】（已用 55/55 个真实请求验证通过）
+    T = "amiauhsnehnujiauhz"          ← 把 huijiayuanshenhua 倒过来
+    api_secret = MD5(api_target + api_key + api_input + api_timespan + T).upper()
+
+【签到奖励】7天阶梯 4/8/12/... g 雨水
+
 【定时】
-    cron: 0 8 * * *
+   cron: 0 8 * * *
 
 ================================================================================
 """
@@ -67,6 +72,8 @@ SIGN_CODE = 'QD200202100001'      # 签到码
 EVENT_CODE = 'CX200320100007'     # 农场事件码
 TASKS = (os.environ.get('HJC_TASKS') or 'all').strip()
 WATER_TIMES = int(os.environ.get('HJC_WATER') or 6)   # 每次运行浇几次水
+STEAL_LIMIT = int(os.environ.get('HJC_STEAL_LIMIT') or 10)   # 最多偷几位好友/路人
+NO_STEAL = (os.environ.get('HJC_NO_STEAL') or '').strip() in ('1', 'true', 'on')
 
 _ACC = None
 
@@ -232,6 +239,123 @@ def do_pick_all(acc, home=None, max_rounds=4):
 
 
 
+def get_friends(acc, page=1):
+    """好友列表: friendList[] + randomMemberCode(随机路人，每次调用都换)"""
+    j = call('com_cmall_familyhas_api_ApiForFarmGetFriends',
+             {'pageIndex': page}, acc['token'])
+    return j if ok(j) else {}
+
+
+def friend_home(acc, member_code):
+    """查看好友/路人农场主页，list[] 里 stealFlag=1 才是可偷的"""
+    j = call('com_cmall_familyhas_api_ApiForFarmHome',
+             {'othersMemberCode': member_code}, acc['token'])
+    return j if ok(j) else {}
+
+
+def steal_water(acc, limit=10):
+    """偷好友/路人水滴（主要雨水来源）
+       返回 (偷水次数, 总雨水, 来源人数)
+    """
+    total = 0
+    picked = 0
+    stolen_from = 0
+    visited = set()
+    empty_rounds = 0
+    random_seen = False
+
+    for _ in range(limit * 5):
+        fr = get_friends(acc)
+        if not fr:
+            break
+        if str(fr.get('randomFlag')) == '1' and fr.get('randomMemberCode'):
+            random_seen = True
+
+        # 优先级：随机路人 > 真好友
+        targets = []
+        rc = fr.get('randomMemberCode') or ''
+        if rc and rc not in visited:
+            targets.append(rc)
+        for f in (fr.get('friendList') or []):
+            fc = f.get('friendMemberCode') or ''
+            if fc and fc not in visited and fc not in targets:
+                targets.append(fc)
+
+        if not targets:
+            empty_rounds += 1
+            if empty_rounds >= 5:
+                if random_seen:
+                    log('   ℹ️ 暂时没有可偷的好友')
+                else:
+                    log('   ℹ️ 服务端未分配随机路人（randomFlag=0），等刷新后再来')
+                break
+            continue
+        empty_rounds = 0
+
+        for code in targets:
+            visited.add(code)
+            fh = friend_home(acc, code)
+            if not fh:
+                continue
+            nickname = fh.get('othersNickName') or code
+            stealable = [w for w in (fh.get('list') or [])
+                         if w.get('wateCode') and str(w.get('stealFlag')) == '1']
+            if not stealable:
+                continue
+            got = 0
+            for w in stealable:
+                rd(800, 1600)
+                st, msg = pick_water(acc, w.get('wateCode'))
+                if st == 'ok':
+                    g = int(w.get('waterNum') or 0)
+                    got += g
+                    total += g
+                    picked += 1
+                else:
+                    break
+            if got:
+                stolen_from += 1
+                log('      ✅ 偷 %s 的 %dg 雨水' % (nickname, got))
+        if len(visited) >= limit:
+            break
+
+    return picked, total, stolen_from
+
+
+def get_stage_prize(acc, tree_code):
+    """查询阶段奖励（未领取的带 userStagePrizeUid）"""
+    j = call('com_cmall_familyhas_api_ApiForFarmGetUserStagePrize',
+             {'treeCode': tree_code}, acc['token'])
+    return j if ok(j) else {}
+
+
+def draw_stage_prize(acc, uid):
+    """领取阶段奖励"""
+    j = call('com_cmall_familyhas_api_ApiForFarmDrawStagePrize',
+             {'stagePrizeUidStr': uid}, acc['token'])
+    return ok(j), (j.get('resultMessage') or '')
+
+
+def do_stage_prizes(acc, tree_code):
+    """自动领取所有可领的阶段奖励，返回领取数量"""
+    j = get_stage_prize(acc, tree_code)
+    if not j:
+        return 0
+    got = 0
+    for p in (j.get('stagePrizeList') or []):
+        uid = p.get('userStagePrizeUid')
+        if not uid:
+            continue
+        rd(1000, 2000)
+        st, msg = draw_stage_prize(acc, uid)
+        if st:
+            got += 1
+            log('      🎁 阶段奖励领取成功：%s' % (p.get('productName') or p.get('stageName') or uid))
+        else:
+            log('      ❌ 阶段奖励领取失败：%s' % (msg or '-')[:40])
+    return got
+
+
 def get_user_tree(acc):
     """获取我的树信息；treeCode 在 farmTree 里"""
     j = call('com_cmall_familyhas_api_ApiGetHuodongFarmUserTree', {}, acc['token'])
@@ -326,7 +450,7 @@ def run_tasks(acc, max_rounds=3):
 
 # ==================== 单账号 ====================
 def run_account(acc):
-    out = {'name': acc['name'], 'sign': '-', 'water': '-', 'tasks': 0, 'task_water': 0, 'sign_water': 0, 'pick_water': 0, 'pick_times': 0,
+    out = {'name': acc['name'], 'sign': '-', 'water': '-', 'tasks': 0, 'task_water': 0, 'sign_water': 0, 'pick_water': 0, 'pick_times': 0, 'steal_water': 0, 'steal_times': 0, 'stage_prize': 0,
            'reason': '', 'error': None}
     want = TASKS.lower()
 
@@ -412,6 +536,21 @@ def run_account(acc):
     else:
         log('   ⏭️ 收雨水已跳过')
 
+    # 偷好友/路人水滴（雨水主要来源）
+    if (want in ('all',) or 'steal' in want) and STEAL_LIMIT > 0 and not NO_STEAL:
+        log('   🥷 偷好友水滴（上限 %d 人）' % STEAL_LIMIT)
+        snum, swater, sfrom = steal_water(acc, STEAL_LIMIT)
+        out['steal_times'] = snum
+        out['steal_water'] = swater
+        if swater:
+            log('   ✅ 偷到 %dg 雨水（来自 %d 人）' % (swater, sfrom))
+        else:
+            log('   ℹ️ 无可偷水滴')
+    elif NO_STEAL:
+        log('   ⏭️ 偷水滴已关闭（NO_STEAL=1）')
+    else:
+        log('   ⏭️ 偷水滴已跳过')
+
     # 浇水（做 WATER_TIMES 次）
     if want in ('all',) or 'water' in want:
         log('   💧 浇水 %d 次' % WATER_TIMES)
@@ -428,6 +567,15 @@ def run_account(acc):
         out['water'] = 'ok' if okc else 'fail'
         out['water_times'] = okc
         log('   ✅ 共浇水 %d/%d 次' % (okc, WATER_TIMES))
+
+        # 浇水可能让树升级，顺手领阶段奖励
+        rd(1200, 2000)
+        h3 = get_home(acc)
+        st_code = ((h3.get('farmTree') or {}).get('treeCode')) or tree_code
+        pz = do_stage_prizes(acc, st_code)
+        out['stage_prize'] = pz
+        if pz:
+            log('   🎁 领取 %d 个阶段奖励' % pz)
     else:
         log('   ⏭️ 浇水已跳过')
         out['water'] = 'skip'
@@ -485,7 +633,8 @@ def build_report(results):
         tw = r.get('task_water') or 0
         wt = r.get('water_times') or 0
         pw = r.get('pick_water') or 0
-        gain = sw + tw + pw
+        stw = r.get('steal_water') or 0
+        gain = sw + tw + pw + stw
         sign_txt = ('签到+%dg' % sw) if sw else (
             '签到已做' if r.get('sign') == 'already' else '签到✗')
         seg = [sign_txt]
@@ -495,12 +644,17 @@ def build_report(results):
             seg.append('任务%d个' % r['tasks'])
         if pw:
             seg.append('收水+%dg(%d滴)' % (pw, r.get('pick_times') or 0))
+        if stw:
+            seg.append('偷水+%dg(%d次)' % (stw, r.get('steal_times') or 0))
+        if r.get('stage_prize'):
+            seg.append('阶段奖%d个' % r['stage_prize'])
         if wt:
             seg.append('浇水%d次' % wt)
         lines.append('%s  %s' % (r['name'], ' ｜ '.join(seg)))
         lines.append('   水壶：%s g   今日新增：+%dg' % (r.get('end_water'), gain))
     if len(results) > 1:
-        total = sum((r.get('sign_water') or 0) + (r.get('task_water') or 0) + (r.get('pick_water') or 0) for r in results)
+        total = sum((r.get('sign_water') or 0) + (r.get('task_water') or 0) +
+                    (r.get('pick_water') or 0) + (r.get('steal_water') or 0) for r in results)
         lines.append('')
         lines.append('合计今日新增：+%dg' % total)
     return '\n'.join(lines)
