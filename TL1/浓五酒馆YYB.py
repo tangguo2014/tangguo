@@ -405,12 +405,24 @@ def nyg_active_activity(token):
                          params={'type': 2, 'pageNo': 1, 'pageSize': 10},
                          headers=nyg_headers(token), timeout=30)
         d = r.json()
-        if d.get('code') == 0:
-            data = d.get('data') or {}
-            lst = data.get('list') or data.get('records') or (data if isinstance(data, list) else [])
-            if lst:
-                active = next((a for a in lst
-                               if a.get('status') == 1 or a.get('statusName') == '进行中'), lst[0])
+        # 兼容三种返回：list / {code,data:list} / {code,data:{list|records}}
+        if isinstance(d, list):
+            lst = d
+        elif isinstance(d, dict) and str(d.get('code')) == '0':
+            data = d.get('data')
+            if isinstance(data, list):
+                lst = data
+            elif isinstance(data, dict):
+                lst = data.get('list') or data.get('records') or []
+            else:
+                lst = []
+        else:
+            lst = []
+        if lst:
+            active = next((a for a in lst if isinstance(a, dict) and
+                           (a.get('status') == 1 or a.get('statusName') == '进行中')),
+                          lst[0] if isinstance(lst[0], dict) else None)
+            if active:
                 log('获取到活动: [%s]' % active.get('name'))
                 return str(active.get('id'))
     except Exception as e:
