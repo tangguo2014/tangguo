@@ -6,10 +6,20 @@ vx小程序  好想来零食乐园 · 签到
 ================================================================================
 
 【变量】
-    hxl_gpt = 备注#Cookie
+    hxl_gpt = 备注#Cookie＋_ref_extra（张三#ck;ref）
               Cookie 从抓包 sign/action 请求头的 Cookie 整行复制，
               必须包含 appKey / openId / userId / ls / unionId 这几项
-    多账号：& 或换行分隔
+              多账号：& 或换行分隔
+
+【_ref_extra】
+
+    取值：Referer 里 devVersion=DV100& 后面那一整段
+    例： devVersion=DV100&这里开始复制ckuiq=scee9ssg&qrg=st3uankbplw9
+    
+【可选】
+    XL_HOST        活动域名（后缀会变 l077/ohpk，脚本会自动探测）
+    XL_PLAN_ID     活动ID，每月轮换时改
+    XL_ENABLED     0/false/off 停用
 
 【每月轮换提醒】
     这是月度活动，每月会新建一个新活动（新的 activityPlanId）。
@@ -41,8 +51,12 @@ import hashlib
 import requests
 
 ENV_NAME = 'hxl_gpt'
-HOST = (os.environ.get('XL_HOST') or '').strip() or \
-       'https://p8913620478250l077-saas.bx-activity.meta-xuantan.com'
+# 小满实例后缀会变（l077 → ohpk → ...），运行时自动探测
+HOST_CANDIDATES = [
+    'https://p8913620478250ohpk-saas.bx-activity.meta-xuantan.com',
+    'https://p8913620478250l077-saas.bx-activity.meta-xuantan.com',
+]
+HOST = (os.environ.get('XL_HOST') or '').strip() or HOST_CANDIDATES[0]
 
 # ============ 活动开关（每月活动会换，需要改这里） ============
 # 每月活动轮换时，用抓包里的新 activityPlanId 覆盖下面这个即可
@@ -54,6 +68,8 @@ ENABLED = (os.environ.get('XL_ENABLED') or '1').strip().lower() not in ('0', 'fa
 
 TOKEN_SALT = 'J7h8&^Bgs5#bn*7hn%!=kh308*bv2!s^'   # getUserToken 专用盐
 SIGN_SALT = 'uh3$Hg&^HK876%gbxVG7f$%p=0M~>s1x'
+# Referer 尾部会话参数（从 Cookie 里的 _ref_extra 项解析，无需单独配变量）
+REF_EXTRA_KEY = '_ref_extra'
 UA = ('Mozilla/5.0 (iPhone; CPU iPhone OS 16_3 like Mac OS X) AppleWebKit/605.1.15 '
       '(KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.76(0x18004c3a) '
       'NetType/4G Language/zh_CN')
@@ -71,22 +87,33 @@ def mask(s):
     return s[:20] + '****' + s[-6:] if len(s) > 30 else s
 
 
-# ==================== 账号解析 ====================
+def extract_ref_extra(cookie):
+    """从 Cookie 串里取出 _ref_extra 的值（Referer 尾部参数）
+       写法：_ref_extra=slulg=xxx&ggm=yyy
+       注意值里是 & 分隔，不含 ;，因此不会与 Cookie 分隔符冲突"""
+    m = re.search(r'_ref_extra=([^;]+)', cookie)
+    return m.group(1).strip() if m else ''
+
 def parse_entries():
     raw = (os.environ.get(ENV_NAME) or '').strip()
     if not raw:
         return []
     out = []
+    # _ref_extra=xxx&yyy 里的 & 是参数分隔符，不能当账号分隔符
+    # 先把它临时替换成占位符，解析完再还原
+    raw = re.sub(r'_ref_extra=([^;\s]+)', lambda mm: '_ref_extra=' + mm.group(1).replace('&', '\x01'), raw)
     for line in re.split(r'[&\n]+', raw):
         line = line.strip()
         if not line:
             continue
+        line = line.replace('\x01', '&')
         parts = [p.strip() for p in line.split('#', 1)]
         if len(parts) >= 2:
             name, cookie = parts[0], parts[1]
         else:
             name, cookie = '账号%d' % (len(out) + 1), parts[0]
-        out.append({'name': name, 'cookie': cookie})
+        out.append({'name': name, 'cookie': cookie,
+                    'ref_extra': extract_ref_extra(cookie)})
     return out
 
 
@@ -136,13 +163,16 @@ def build_referer(acc):
     ls = cookie_get(c, 'ls')                       # 形如 4644...9814-1
     li = ls.rsplit('-', 1)[0] if '-' in ls else ls
     plan_id = acc.get('plan_id') or DEFAULT_PLAN_ID
+    # 尾部两参数名随机（orcow/ssm, slulg/ggm, djqtt/aco...），与 Cookie 会话绑定
+    # 存放在 Cookie 串的 _ref_extra 项里，格式：_ref_extra=slulg=xxx&ggm=yyy
+    ref_extra = (os.environ.get('XL_REF_EXTRA') or '').strip() or acc.get('ref_extra', '')
     return ('%s/saas_marketing_signin.html?appKey=%s&placeId=%s&activityPlanId=%s'
             '&applicationId=11&li=%s&hi=xmps&channelType=1043&platformEnv=4'
-            '&devVersion=DV100&orcow=o4bconlw&ssm=x9a1uwi0wp3y'
-            % (HOST, app_key, place_id, plan_id, li))
+            '&devVersion=DV100&%s'
+            % (HOST, app_key, place_id, plan_id, li, ref_extra))
 
 
-def build_headers(acc, sign_params, xm_token='', json_body=False):
+def build_headers(acc, sign_params, xm_token='', json_body=False, function_id='0'):
     h = {
         'User-Agent': UA,
         'Accept': 'application/json, text/plain, */*',
@@ -150,7 +180,7 @@ def build_headers(acc, sign_params, xm_token='', json_body=False):
         'Referer': build_referer(acc),
         'Origin': HOST,
         'Cookie': acc['cookie'],
-        'functionId': '0',
+        'functionId': str(function_id),
         'nonceStr': sign_params['nonceStr'],
         'xmTimestamp': str(sign_params['xmTimestamp']),
         'xmSign': xm_sign(sign_params),
@@ -163,22 +193,27 @@ def build_headers(acc, sign_params, xm_token='', json_body=False):
 
 
 # ==================== 接口 ====================
-def api_get(acc, path, query=None, xm_token=''):
+def api_get(acc, path, query=None, xm_token='', function_id='0'):
     query = dict(query or {})
     sp = dict(query)
+    # 前端规则：GET 签名剔除 functionId，但它要单独放 header
+    sp.pop('functionId', None)
     sp['nonceStr'] = gen_nonce()
     sp['xmTimestamp'] = int(time.time() * 1000)
+    if str(function_id) == '0' and query.get('functionId'):
+        function_id = str(query['functionId'])
     url = HOST + path
     if query:
         url += '?' + '&'.join('%s=%s' % (k, v) for k, v in query.items())
     try:
-        r = requests.get(url, headers=build_headers(acc, sp, xm_token), timeout=20)
+        r = requests.get(url, headers=build_headers(acc, sp, xm_token,
+                                                   function_id=function_id), timeout=20)
         return r.json()
     except Exception as e:
         return {'code': '-999', 'desc': '请求异常: %s' % str(e)[:120]}
 
 
-def api_post(acc, path, payload, xm_token=''):
+def api_post(acc, path, payload, xm_token='', function_id='0'):
     """POST 签名顺序很重要：先取 xmToken 并入参，再算 xmSign"""
     sp = dict(payload)
     sp['nonceStr'] = gen_nonce()
@@ -186,7 +221,7 @@ def api_post(acc, path, payload, xm_token=''):
     if xm_token:
         sp['xmToken'] = xm_token          # 必须在 xmSign 之前放进去
     try:
-        r = requests.post(HOST + path, headers=build_headers(acc, sp, xm_token, json_body=True),
+        r = requests.post(HOST + path, headers=build_headers(acc, sp, xm_token, json_body=True, function_id=function_id),
                           data=json.dumps(payload, ensure_ascii=False).encode('utf-8'),
                           timeout=20)
         return r.json()
@@ -205,15 +240,41 @@ def get_xm_token(acc):
     nonce = gen_nonce()
     token_sign = hashlib.md5(
         ('%s%s%s%s' % (li, nonce, ts, TOKEN_SALT)).encode('utf-8')).hexdigest()
-    j = api_get(acc, '/xm/token/getUserToken', {
-        'timestamp': ts,
-        'nonceStr': nonce,
-        'tokenSign': token_sign,
-    })
+    # 必须手动构造：tokenSign 与 query 里的 timestamp/nonceStr 必须严格一致，
+    # 走 api_get 会重新生成 nonceStr/xmTimestamp 导致 tokenSign 对不上
+    url = ('%s/xm/token/getUserToken?timestamp=%d&nonceStr=%s&tokenSign=%s'
+           % (HOST, ts, nonce, token_sign))
+    try:
+        r = requests.get(url, headers=build_headers(acc, {'nonceStr': nonce, 'xmTimestamp': ts}),
+                         timeout=20)
+        j = r.json()
+    except Exception as e:
+        log('   ⚠️ 获取 xmToken 异常：%s' % str(e)[:60])
+        return ''
     if str(j.get('code')) == '0' and isinstance(j.get('data'), str):
         return j['data']
     log('   ⚠️ 获取 xmToken 失败：%s' % (j.get('desc') or j.get('code')))
     return ''
+
+
+
+def probe_host(acc):
+    """探测可用域名：小满每个实例后缀不同（l077/ohpk/...），
+       用 sign/getConfig 返回 code=0 判断哪个通"""
+    global HOST
+    for cand in HOST_CANDIDATES:
+        if cand == HOST:
+            continue
+        old = HOST
+        HOST = cand
+        try:
+            r = api_get(acc, '/sign/getConfig', {'curDate': time.strftime('%Y-%m-%d')})
+            if str(r.get('code')) == '0':
+                log('   🌐 切换域名: %s' % cand.split('//')[1].split('-')[0][-4:])
+                return
+        except Exception:
+            pass
+        HOST = old
 
 
 # ==================== 业务 ====================
@@ -268,6 +329,8 @@ def run_account(acc):
 
     log('👤 账号：%s' % acc['name'])
     log('   Cookie：%s' % mask(acc['cookie']))
+
+    probe_host(acc)
     log('')
 
     # 1. 校验登录态（跑一次带签名的 getConfig）
