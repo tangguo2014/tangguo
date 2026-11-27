@@ -3,6 +3,7 @@
 ================================================================================
 网上国网 每日签到（登录成功缓存15天后续静默账密登录）
 ================================================================================
+
 依赖安装
       pip3 install requests gmssl pycryptodome
 
@@ -513,6 +514,22 @@ def sms_login(account, code, code_key):
     return _login_result(data, "短信登录")
 
 
+def force_relogin(account, password=""):
+    """令牌被风控拒绝（RK001）时：清缓存 + 重新登录"""
+    try:
+        path = _state_file(account)
+        if os.path.exists(path):
+            os.remove(path)
+            print("  🗑️ 已清除失效令牌缓存")
+    except Exception:
+        pass
+    if not password:
+        raise LoginError("no_password", "缓存失效且未配置密码，无法自动重登")
+    token, userid, lifetime = do_login(account, password)
+    save_token(account, token, userid, lifetime)
+    return token, userid, "密码重登"
+
+
 def ensure_token(account, password=""):
     """优先级：环境变量手抓令牌 > 本地缓存 > 密码登录"""
     env_t = (os.environ.get("SGCC_TOKEN") or "").strip()
@@ -598,6 +615,10 @@ def call(name, token, userid):
     code, msg, data = split_result(resp)
     if code == "101007":
         raise LoginError("101007", "令牌已过期")
+    # RK001 等风控码：令牌表面未过期，但服务端已拒绝（所有接口都会返回空）
+    joined = (str(code) + str(msg) + str(data)).upper()
+    if "RK001" in joined or "RK0" in joined[:8]:
+        raise LoginError("RK001", "风控拦截(RK001)，令牌或设备指纹已失效")
     return code, msg, data
 
 
@@ -660,6 +681,7 @@ def banner():
     print("  ╭────────────────────────────────╮")
     print("  │   网上国网 · 签到（自动登录）   │")
     print("  ╰────────────────────────────────╯")
+
 
 
 # ────────────────────────────── 主流程 ──────────────────────────────
@@ -992,6 +1014,38 @@ def _run_one(acct, args):
             print("   ℹ️ 新设备校验：先 --send-sms 再 --code <验证码>")
         return 1
     print("🔑 令牌来源：%s | userId=%s" % (source, userid))
+
+    # 缓存/环境变量令牌可能已被服务端判死：
+    #   表现一：接口直接抛 RK001 / 101007
+    #   表现二：接口不报错，但 data 是空对象 {}（风控静默丢弃）
+    # 先探一次只读接口，命中任一情况就清缓存重登
+    if source.startswith("本地缓存") or source == "环境变量":
+        need_relogin = False
+        reason = ""
+        try:
+            code, msg, data = call("query_sign", token, userid)
+            if not data or data == {}:
+                need_relogin = True
+                reason = "余额查询返回空"
+        except LoginError as e:
+            if str(e.code) in ("RK001", "101007"):
+                need_relogin = True
+                reason = str(e.code)
+        except Exception:
+            pass
+
+        if need_relogin:
+            print("  ⚠️ 令牌被服务端拒绝（%s），尝试重新登录" % reason)
+            try:
+                token, userid, source = force_relogin(account, password)
+                print("🔑 令牌来源：%s | userId=%s" % (source, userid))
+            except LoginError as e2:
+                print("  ❌ 重登失败：%s" % e2)
+                if str(e2).find("no_password") >= 0:
+                    print("     ℹ️ 未配置密码，无法自动重登，请用 --send-sms/--code 手动获取")
+                else:
+                    print("     ℹ️ 若仍为 RK001，通常是出口 IP 变了，执行 --smoke 自检")
+                return 1
 
     expired = {"hit": False}
 
